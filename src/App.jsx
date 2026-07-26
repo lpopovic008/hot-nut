@@ -2589,12 +2589,15 @@ async function loadH2H(aId, bId) {
   return { aw,bw,upcoming,played,meetings };
 }
 
-// a batter's career line vs a specific pitcher (single split row of stats)
+// a batter's all-time (career) line vs a specific pitcher, one aggregated
+// split across every season they've ever faced each other — `vsPlayer`
+// returns a separate split PER season instead, which would only surface
+// whichever single season happens to land first in the response.
 async function loadBatterVs(batterId, pitcherId) {
   if (!batterId || !pitcherId) return null;
   try {
     const r = await fetch(`${API}/people/${batterId}/stats` +
-      `?stats=vsPlayer&opposingPlayerId=${pitcherId}&group=hitting&gameType=R`);
+      `?stats=vsPlayerTotal&opposingPlayerId=${pitcherId}&group=hitting&gameType=R`);
     if (!r.ok) return null;
     const j = await r.json();
     return j.stats?.[0]?.splits?.[0]?.stat || null;
