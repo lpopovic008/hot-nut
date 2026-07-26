@@ -550,8 +550,8 @@ function TravelTrends({ tags, setTag, onReady }) {
     setBusy(true);
     try {
       /* ── window schedule (travel + next-game lookup + probable pitchers) ──
-         fetch from 3 days back so the -2 day's travel has a "prev day". */
-      const from = addDays(start,-3), to = addDays(start,4);
+         fetch from 4 days back so the -3 day's travel has a "prev day". */
+      const from = addDays(start,-4), to = addDays(start,3);
       const r = await fetch(`${API}/schedule?sportId=1&startDate=${from}&endDate=${to}` +
         `&gameType=R&hydrate=probablePitcher,linescore(runners),lineups`);
       if (!r.ok) throw new Error(`schedule ${r.status}`);
@@ -587,8 +587,8 @@ function TravelTrends({ tags, setTag, onReady }) {
             (byTeamDate[tid] = byTeamDate[tid]||{})[d.date] = venueTz; });
           // gamePk (not just date) identifies the exact game — a doubleheader
           // puts two of these in a row for the same team on the same date
-          if (hp?.id) (scheduleByTeam[away.id] = scheduleByTeam[away.id]||[]).push({ date:d.date, time:g.gameDate, gamePk:g.gamePk, oppPid:hp.id });
-          if (ap?.id) (scheduleByTeam[home.id] = scheduleByTeam[home.id]||[]).push({ date:d.date, time:g.gameDate, gamePk:g.gamePk, oppPid:ap.id });
+          if (hp?.id) (scheduleByTeam[away.id] = scheduleByTeam[away.id]||[]).push({ date:d.date, time:g.gameDate, gamePk:g.gamePk, oppPid:hp.id, isFinal });
+          if (ap?.id) (scheduleByTeam[home.id] = scheduleByTeam[home.id]||[]).push({ date:d.date, time:g.gameDate, gamePk:g.gamePk, oppPid:ap.id, isFinal });
         });
       });
       Object.values(scheduleByTeam).forEach(list=>list.sort((a,b)=>a.time.localeCompare(b.time)));
@@ -613,12 +613,12 @@ function TravelTrends({ tags, setTag, onReady }) {
       // 2. Expand outward one column on each side. Any game there still
       //    without a home fills the lowest empty gap (white/gray) and itself
       //    becomes a seed — its matchups are found and locked into its row.
-      // 3. Repeat outward (2 cols, 3 cols, 4 cols) until the edges.
+      // 3. Repeat outward (2 cols, 3 cols) until the edges.
       // ────────────────────────────────────────────────────────────────
 
-      const TODAY_DI = 2;
+      const TODAY_DI = 3;
       const DATES = [];
-      for(let i=-2;i<=4;i++) DATES.push(addDays(start,i));
+      for(let i=-3;i<=3;i++) DATES.push(addDays(start,i));
       const perDay = DATES.map(d=>buildList(d));   // sorted by start time
       const numDays = DATES.length;
 
@@ -778,7 +778,8 @@ function TravelTrends({ tags, setTag, onReady }) {
         const list = scheduleByTeam[tid] = scheduleByTeam[tid] || [];
         const known = new Set(list.map(s=>s.gamePk));
         Object.entries(games).forEach(([time, { gamePk }])=>{
-          if (!known.has(gamePk)) list.push({ date:time.slice(0,10), time, gamePk, oppPid:null });
+          // every entry here comes from the completed-games (`finals`) list
+          if (!known.has(gamePk)) list.push({ date:time.slice(0,10), time, gamePk, oppPid:null, isFinal:true });
         });
       });
       Object.values(scheduleByTeam).forEach(list=>list.sort((a,b)=>a.time.localeCompare(b.time)));
@@ -917,16 +918,32 @@ function TravelTrends({ tags, setTag, onReady }) {
          game (e.g. yesterday's, feeding two different
          cells) is only fetched once.
 
-         Games tomorrow or later don't get this — only today's (and any
-         earlier) games in the window actually need it. ── */
+         Only each team's next still-to-be-played game gets this — as
+         games finish during the day, the "next game" for those two teams
+         shifts forward (to a later doubleheader game today, or to
+         tomorrow's game) and picks up the trio there instead.
+         Already-played/in-progress games are unaffected. Goes by each
+         game's own tracked isFinal/isLive status, not a wall-clock
+         comparison — a doubleheader's already-final early leg doesn't get
+         mistaken for still being "next up" ahead of its own late leg. ── */
+      const nextUpGamePk = {};   // teamId -> gamePk of its earliest not-yet-final game in this window
+      Object.values(dayGames).flat().forEach(g=>{
+        if (g.isFinal || g.isLive) return;
+        [g.awayId, g.homeId].forEach(tid=>{
+          if (nextUpGamePk[tid]==null || g.time < nextUpGamePk[tid].time)
+            nextUpGamePk[tid] = { gamePk:g.gamePk, time:g.time };
+        });
+      });
+      const needsBatTrio = (tid, g) =>
+        g.isFinal || g.isLive || nextUpGamePk[tid]?.gamePk === g.gamePk;
       const neededGamePks = new Set();
       DATES.forEach(date=>{
-        if (date > start) return;
         (dayGames[date]||[]).forEach(g=>{
           // compares against this exact game's own start time, not just its
           // calendar date — on a doubleheader, the earlier game is a valid
           // "previous game" for the later one despite sharing a date
           [g.awayId, g.homeId].forEach(tid=>{
+            if (!needsBatTrio(tid, g)) return;
             const m = gamePkByDate[tid];
             if (!m) return;
             Object.keys(m).filter(t=>t<g.time).sort().reverse().slice(0,3)
@@ -1217,10 +1234,22 @@ function TravelTrends({ tags, setTag, onReady }) {
     // later game's own "previous game" instead of being skipped entirely;
     // the actual value shown comes from battingScoreMap.
     //
-    // games tomorrow or later just show the "–" placeholder (same look as
-    // still-loading) instead of computing the trio at all.
+    // only this team's NEXT still-to-be-played game shows the trio at all —
+    // any other, further-out future game just shows the "–" placeholder
+    // (same look as still-loading) instead of repeating the same numbers on
+    // every card in a homestand. As a game finishes, the team's "next game"
+    // shifts forward (a later doubleheader leg today, or tomorrow's game)
+    // and picks up the trio there. Already-played/in-progress games are
+    // unaffected. Goes by each game's own tracked status (isFinal/isLive),
+    // not a wall-clock comparison — a doubleheader's early leg can already
+    // be Final well before its late leg's own scheduled time arrives, and
+    // the late leg is still that team's own "next game up" despite that.
     const hitsTrio = (tid) => {
-      if (date > start) return [null, null, null];
+      if (!g.isFinal && !g.isLive) {
+        const sched = scheduleMap[tid];
+        const nextUp = sched && sched.find(s => !s.isFinal);
+        if (nextUp && nextUp.gamePk !== g.gamePk) return [null, null, null];
+      }
       const m = hitsMap[tid];
       if (!m) return [null, null, null];
       const scores = battingScoreMap[tid] || {};
