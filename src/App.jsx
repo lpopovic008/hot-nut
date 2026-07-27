@@ -284,6 +284,155 @@ function drawPlayIndicator(x, result, bx, by, size = 14) {
 // redundant on an exported image that's already understood to be a play
 const stripPlayPrefix = (t) => (t||"").replace(/^\s*play\s*[·:\-–]?\s*/i, "");
 
+// hand-drawn line chart for the exported plays card — mirrors the live
+// Recharts "cumulative net" chart (dashed zero line, dots only at local
+// highs/lows, a trailing net-value label) without pulling Recharts into a
+// raster export.
+function drawNetChart(x, left, top, w, h, data, dotIdx) {
+  roundedRectPath(x, left, top, w, h, 4);
+  x.fillStyle = "#fff"; x.fill();
+  x.strokeStyle = "#CDD3DA"; x.lineWidth = 1; x.stroke();
+  if (data.length < 2) {
+    x.fillStyle = "#9AA3AD"; x.font = `10px ${MONO}`;
+    x.textAlign = "center"; x.textBaseline = "middle";
+    x.fillText("Grade at least 1 play to see the trend", left+w/2, top+h/2);
+    return;
+  }
+  const padX = 12, padY = 16;
+  const cx0 = left+padX, cx1 = left+w-padX, cy0 = top+padY, cy1 = top+h-padY;
+  const nets = data.map(d=>d.net);
+  let min = Math.min(0, ...nets), max = Math.max(0, ...nets);
+  if (min===max) { min -= 1; max += 1; }
+  const xAt = (i) => cx0 + (i/(data.length-1)) * (cx1-cx0);
+  const yAt = (v) => cy1 - ((v-min)/(max-min)) * (cy1-cy0);
+  if (min < 0 && max > 0) {
+    x.save();
+    x.setLineDash([3,3]); x.strokeStyle = "#9AA3AD"; x.lineWidth = 1;
+    x.beginPath(); x.moveTo(cx0, yAt(0)); x.lineTo(cx1, yAt(0)); x.stroke();
+    x.restore();
+  }
+  x.strokeStyle = "#2B4C7E"; x.lineWidth = 2; x.beginPath();
+  data.forEach((d,i)=>{ const px=xAt(i), py=yAt(d.net); if (i===0) x.moveTo(px,py); else x.lineTo(px,py); });
+  x.stroke();
+  data.forEach((d,i)=>{
+    if (!dotIdx.has(i)) return;
+    x.beginPath(); x.arc(xAt(i), yAt(d.net), 2.5, 0, Math.PI*2);
+    x.fillStyle = "#2B4C7E"; x.fill();
+  });
+  const last = data[data.length-1];
+  const lastColor = last.net>0 ? "#1B7F5C" : last.net<0 ? "#D7263D" : "#525A66";
+  x.fillStyle = lastColor; x.font = `700 12px ${MONO}`;
+  x.textAlign = "right"; x.textBaseline = "alphabetic";
+  x.fillText(`${last.net>0?"+":""}${last.net}`, cx1, Math.max(top+13, yAt(last.net)-8));
+}
+
+// a simple box blur over raw ImageData — used instead of the canvas'
+// built-in `ctx.filter = "blur()"` because on this engine, once ANY
+// stroke() has been called on a canvas, ctx.filter silently stops applying
+// to everything drawn on it afterward (a real rendering bug, reproduced in
+// isolation: a single strokeRect() call permanently breaks later filtered
+// fillText on that same context). Operating on the pixel buffer directly
+// sidesteps it entirely.
+function boxBlurImageData(imageData, radius) {
+  const { data, width, height } = imageData;
+  const src = new Uint8ClampedArray(data);
+  for (let y=0; y<height; y++) {
+    for (let px=0; px<width; px++) {
+      let r=0, g=0, b=0, a=0, n=0;
+      for (let dy=-radius; dy<=radius; dy++) {
+        const yy = y+dy; if (yy<0 || yy>=height) continue;
+        for (let dx=-radius; dx<=radius; dx++) {
+          const xx = px+dx; if (xx<0 || xx>=width) continue;
+          const i = (yy*width+xx)*4;
+          r+=src[i]; g+=src[i+1]; b+=src[i+2]; a+=src[i+3]; n++;
+        }
+      }
+      const o = (y*width+px)*4;
+      data[o]=r/n; data[o+1]=g/n; data[o+2]=b/n; data[o+3]=a/n;
+    }
+  }
+  return imageData;
+}
+
+// draws onto a small offscreen canvas via `drawFn(offscreenCtx)`, blurs the
+// result with boxBlurImageData, then composites it onto the destination
+// context at (dx,dy) — a drop-in "draw this, but blurred" for exports.
+function drawBlurredOnto(destCtx, dx, dy, w, h, scale, radius, drawFn) {
+  const off = document.createElement("canvas");
+  off.width = Math.ceil(w*scale); off.height = Math.ceil(h*scale);
+  const octx = off.getContext("2d");
+  octx.scale(scale, scale);
+  drawFn(octx);
+  const imgData = octx.getImageData(0, 0, off.width, off.height);
+  boxBlurImageData(imgData, radius);
+  octx.putImageData(imgData, 0, 0);
+  destCtx.drawImage(off, dx, dy, w, h);
+}
+
+// one row of the exported "last 10 plays" list. A play that hasn't been
+// graded yet still shows — matchup and the game's date stay legible — but
+// the pick text and its exact first-pitch time are blurred out, so sharing
+// the export before a play has settled doesn't give away the pick itself.
+function drawPlaysRow(x, left, top, w, h, r) {
+  const graded = r.result==="W" || r.result==="L" || r.result==="P";
+  const tint = r.result==="W" ? "rgba(27,127,92,0.10)"
+    : r.result==="L" ? "rgba(215,38,61,0.09)"
+    : r.result==="P" ? "rgba(43,76,126,0.09)" : "#fff";
+  const edge = r.result==="W" ? "#1B7F5C" : r.result==="L" ? "#D7263D"
+    : r.result==="P" ? "#2B4C7E" : "#CDD3DA";
+  roundedRectPath(x, left, top, w, h, 4);
+  x.fillStyle = tint; x.fill();
+  x.strokeStyle = "#CDD3DA"; x.lineWidth = 1; x.stroke();
+  x.fillStyle = edge; x.fillRect(left, top, 3, h);
+
+  const cy = top + h/2;
+  drawLogoIcon(x, left+18, cy, 16);
+
+  x.textAlign = "left"; x.textBaseline = "middle";
+  const matchup = r.away && r.home ? `${TEAM_ABBR[r.awayId]||r.away}@${TEAM_ABBR[r.homeId]||r.home}` : "";
+  x.fillStyle = "#525A66"; x.font = `700 10px ${MONO}`;
+  x.fillText(matchup, left+32, cy);
+
+  const indicatorX = left+w-20;
+  const dateTimeRight = indicatorX - 10;
+  const dateTimeW = 60;
+  const playStartX = left+90;
+  const playMaxW = Math.max(20, (dateTimeRight-dateTimeW) - playStartX);
+  const playText = stripPlayPrefix(r.text);
+
+  // the indicator box strokes an outline when ungraded — draw it (along with
+  // everything else above) BEFORE any blurred drawImage compositing below.
+  // On this engine, a stroke() called AFTER a blurred drawImage() onto the
+  // same canvas silently un-blurs it retroactively (reproduced in isolation);
+  // strokes that happen first, or on a later row, don't cause this.
+  drawPlayIndicator(x, r.result, indicatorX, top+h/2-8, 16);
+
+  if (graded) {
+    drawGreenTag(x, playText, playStartX, cy, playMaxW, 12);
+  } else {
+    const padB = 6;
+    drawBlurredOnto(x, playStartX-padB, top, playMaxW+padB*2, h, 3, 3, (octx)=>{
+      drawGreenTag(octx, playText, padB, h/2, playMaxW, 12);
+    });
+  }
+
+  const dateStr = r.date ? calDay(r.date).md : "";
+  const timeStr = r.time ? fmtTime(r.time) : "";
+  x.textAlign = "right";
+  x.fillStyle = "#9AA3AD"; x.font = `10px ${MONO}`;
+  x.fillText(dateStr, dateTimeRight, cy-6);
+  if (graded) {
+    x.fillText(timeStr, dateTimeRight, cy+6);
+  } else if (timeStr) {
+    const padB = 6;
+    drawBlurredOnto(x, dateTimeRight-dateTimeW-padB, cy, dateTimeW+padB*2, 14, 3, 2, (octx)=>{
+      octx.textAlign = "right"; octx.textBaseline = "middle";
+      octx.fillStyle = "#9AA3AD"; octx.font = `10px ${MONO}`;
+      octx.fillText(timeStr, dateTimeW+padB, 7);
+    });
+  }
+}
+
 // Copy a canvas to the clipboard as PNG. Called synchronously in the click
 // handler and hands ClipboardItem a Promise<Blob> so the browser keeps the
 // user-gesture context (Safari/iOS require this). Falls back to download.
@@ -3404,6 +3553,75 @@ function TagsView({ tags, setResult, setStarred }) {
     return s;
   }, [chartData]);
 
+  // ── export: the record header, the chart exactly as currently filtered,
+  // and the last 10 plays under that same filter — ungraded plays blur
+  // their pick text and time (see drawPlaysRow) ──
+  const [playsCopied, setPlaysCopied] = useState(null);
+  const exportPlays = () => {
+    if (!rows.length) { setPlaysCopied("empty"); setTimeout(()=>setPlaysCopied(null),2000); return; }
+    try {
+      const scale = 3;
+      const W = 480, PAD = 18;
+      const HEAD_H = 34, REC_H = 54, CHART_H = 130, LIST_HEAD_H = 22;
+      const ROW_H = 34, ROW_GAP = 6;
+      const SECTION_GAP = 14;
+      const list = rows.slice(0, 10);
+      const listH = list.length ? list.length*(ROW_H+ROW_GAP) - ROW_GAP : 20;
+      const H = PAD*2 + HEAD_H + REC_H + SECTION_GAP + CHART_H + SECTION_GAP + LIST_HEAD_H + listH;
+
+      const cv = document.createElement("canvas");
+      cv.width = W*scale; cv.height = H*scale;
+      const x = cv.getContext("2d"); x.scale(scale, scale);
+      x.fillStyle = "#E2E5EA"; x.fillRect(0,0,W,H);
+
+      let y = PAD;
+      // header: wordmark + current filter description
+      x.fillStyle = "#14181F"; x.font = "800 20px system-ui, sans-serif";
+      x.textAlign = "left"; x.textBaseline = "alphabetic";
+      x.fillText("MLB", PAD, y+18);
+      const filterDesc = `${rangeLabel.toUpperCase()}${onlyStarred ? " · PICKS ONLY" : " · ALL PLAYS"}`;
+      x.fillStyle = "#525A66"; x.font = `700 9px ${MONO}`;
+      x.textAlign = "right";
+      x.fillText("TRACK RECORD", W-PAD, y+8);
+      x.fillText(filterDesc, W-PAD, y+19);
+      y += HEAD_H;
+
+      // record: W-L, win%, graded count — same numbers as the live dashboard
+      x.textAlign = "left"; x.textBaseline = "alphabetic";
+      x.font = "700 32px ui-monospace, Menlo, monospace";
+      x.fillStyle = "#1B7F5C"; x.fillText(String(wins), PAD, y+32);
+      const wWidth = x.measureText(String(wins)).width;
+      x.fillStyle = "#9AA3AD"; x.fillText("–", PAD+wWidth+3, y+32);
+      const dashWidth = x.measureText("–").width;
+      x.fillStyle = "#D7263D"; x.fillText(String(losses), PAD+wWidth+dashWidth+8, y+32);
+      x.fillStyle = "#525A66"; x.font = `500 11px ${MONO}`;
+      x.fillText(`${rangeLabel}${pct!=null ? ` · ${pct}% win` : ""}`, PAD, y+46);
+      x.fillStyle = "#9AA3AD"; x.font = `10px ${MONO}`;
+      x.fillText(`${graded} graded${rows.length>graded ? ` · ${rows.length-graded} untracked` : ""}`, PAD, y+58);
+      y += REC_H + SECTION_GAP;
+
+      drawNetChart(x, PAD, y, W-PAD*2, CHART_H, chartData, dotIdx);
+      y += CHART_H + SECTION_GAP;
+
+      x.fillStyle = "#525A66"; x.font = `700 10px ${MONO}`; x.textAlign = "left";
+      x.fillText(`LAST ${list.length} PLAY${list.length===1?"":"S"}`, PAD, y+12);
+      y += LIST_HEAD_H;
+
+      list.forEach(r => {
+        drawPlaysRow(x, PAD, y, W-PAD*2, ROW_H, r);
+        y += ROW_H + ROW_GAP;
+      });
+
+      // force a full synchronous readback/repaint of the finished canvas
+      // before handing it to copyCanvas — see drawBlurredOnto's comment
+      x.putImageData(x.getImageData(0, 0, cv.width, cv.height), 0, 0);
+      copyCanvas(cv, `mlb-plays-${todayISO()}.png`, setPlaysCopied);
+    } catch (e) {
+      console.error("exportPlays failed:", e);
+      setPlaysCopied("err"); setTimeout(()=>setPlaysCopied(null),2000);
+    }
+  };
+
   const resBtn = (r, val, label, color) => {
     const on = r.result === val;
     return (
@@ -3457,6 +3675,35 @@ function TagsView({ tags, setResult, setStarred }) {
                   fontFamily:MONO, fontSize:10, letterSpacing:"0.04em", textTransform:"uppercase",
                   cursor:"pointer" }}>{lbl}</button>))}
             </div>
+            <button onClick={exportPlays}
+              aria-label="Export track record"
+              title={playsCopied==="empty" ? "No plays in this range to export"
+                : playsCopied==="err" ? "Export failed — try again"
+                : "Export record, chart, and last 10 plays"}
+              style={{ width:26, height:26, borderRadius:5, cursor:"pointer", flexShrink:0,
+                border:`1px solid ${playsCopied==="ok"?C.over
+                  : (playsCopied==="empty"||playsCopied==="err") ? C.under : "rgba(255,255,255,0.25)"}`,
+                background:playsCopied==="ok"?C.over
+                  : (playsCopied==="empty"||playsCopied==="err") ? C.under : "transparent",
+                color:"#fff",
+                display:"flex", alignItems:"center", justifyContent:"center", padding:0 }}>
+              {playsCopied==="ok" ? (
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none">
+                  <path d="M5 13l4 4L19 7" stroke="#fff" strokeWidth="2.4"
+                    strokeLinecap="round" strokeLinejoin="round"/>
+                </svg>
+              ) : (playsCopied==="empty" || playsCopied==="err") ? (
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none">
+                  <path d="M6 6l12 12M18 6L6 18" stroke="#fff" strokeWidth="2.4" strokeLinecap="round"/>
+                </svg>
+              ) : (
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none">
+                  <rect x="3" y="7" width="18" height="14" rx="2" stroke="rgba(255,255,255,0.85)" strokeWidth="2"/>
+                  <path d="M8 7l1.5-2.5h5L16 7" stroke="rgba(255,255,255,0.85)" strokeWidth="2" strokeLinejoin="round"/>
+                  <circle cx="12" cy="14" r="3.2" stroke="rgba(255,255,255,0.85)" strokeWidth="2"/>
+                </svg>
+              )}
+            </button>
           </div>
         </div>
 
