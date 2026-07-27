@@ -3463,7 +3463,7 @@ function PlayStarBox({ starred, onToggle, size = 22 }) {
 }
 
 /* ════════════════════════ TAGS VIEW ════════════════════════ */
-function TagsView({ tags, setResult, setStarred }) {
+function TagsView({ tags, setResult, setStarred, onReady }) {
   const [range, setRange] = useState("all");   // all|month|lastmonth|7d|30d
   // defaults to showing only starred plays when the tab is first opened
   const [onlyStarred, setOnlyStarred] = useState(true);
@@ -3621,6 +3621,14 @@ function TagsView({ tags, setResult, setStarred }) {
       setPlaysCopied("err"); setTimeout(()=>setPlaysCopied(null),2000);
     }
   };
+  // expose exportPlays/playsCopied to the shared header button (same spot
+  // as the calendar's copySlate icon — see App's single export button).
+  // exportPlays itself is deliberately left out of the deps (same as
+  // copySlate's own onReady effect above) — it's redefined every render, so
+  // including it would just re-fire this effect every render too.
+  useEffect(() => { if (onReady) onReady({ exportPlays, playsCopied }); },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [onReady, playsCopied, tags, onlyStarred, range]);
 
   const resBtn = (r, val, label, color) => {
     const on = r.result === val;
@@ -3675,35 +3683,6 @@ function TagsView({ tags, setResult, setStarred }) {
                   fontFamily:MONO, fontSize:10, letterSpacing:"0.04em", textTransform:"uppercase",
                   cursor:"pointer" }}>{lbl}</button>))}
             </div>
-            <button onClick={exportPlays}
-              aria-label="Export track record"
-              title={playsCopied==="empty" ? "No plays in this range to export"
-                : playsCopied==="err" ? "Export failed — try again"
-                : "Export record, chart, and last 10 plays"}
-              style={{ width:26, height:26, borderRadius:5, cursor:"pointer", flexShrink:0,
-                border:`1px solid ${playsCopied==="ok"?C.over
-                  : (playsCopied==="empty"||playsCopied==="err") ? C.under : "rgba(255,255,255,0.25)"}`,
-                background:playsCopied==="ok"?C.over
-                  : (playsCopied==="empty"||playsCopied==="err") ? C.under : "transparent",
-                color:"#fff",
-                display:"flex", alignItems:"center", justifyContent:"center", padding:0 }}>
-              {playsCopied==="ok" ? (
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none">
-                  <path d="M5 13l4 4L19 7" stroke="#fff" strokeWidth="2.4"
-                    strokeLinecap="round" strokeLinejoin="round"/>
-                </svg>
-              ) : (playsCopied==="empty" || playsCopied==="err") ? (
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none">
-                  <path d="M6 6l12 12M18 6L6 18" stroke="#fff" strokeWidth="2.4" strokeLinecap="round"/>
-                </svg>
-              ) : (
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none">
-                  <rect x="3" y="7" width="18" height="14" rx="2" stroke="rgba(255,255,255,0.85)" strokeWidth="2"/>
-                  <path d="M8 7l1.5-2.5h5L16 7" stroke="rgba(255,255,255,0.85)" strokeWidth="2" strokeLinejoin="round"/>
-                  <circle cx="12" cy="14" r="3.2" stroke="rgba(255,255,255,0.85)" strokeWidth="2"/>
-                </svg>
-              )}
-            </button>
           </div>
         </div>
 
@@ -3927,11 +3906,22 @@ export default function App() {
   const [tab, setTab] = useState("calendar");
   const { tags, tagStatus, setTag, setResult, setStarred } = useTags();
   const [cal, setCal] = useState(null);   // { load, busy } from TravelTrends
+  const [playsApi, setPlaysApi] = useState(null);   // { exportPlays, playsCopied } from TagsView
   const [showDatePicker, setShowDatePicker] = useState(false);
 
   useEffect(() => {
     document.title = "MLB";
   }, []);
+
+  // one shared camera-icon export button in the header — same look on both
+  // tabs, wired to whichever tab's own export function is currently active
+  const exportFn = tab==="calendar" ? cal?.copySlate : tab==="tags" ? playsApi?.exportPlays : null;
+  const exportStatus = tab==="calendar" ? cal?.slateCopied : tab==="tags" ? playsApi?.playsCopied : null;
+  const exportTitle = exportStatus==="empty"
+    ? (tab==="calendar" ? "No tagged picks today — hit Play on a game first" : "No plays in this range to export")
+    : exportStatus==="err" ? "Copy failed — try again"
+    : tab==="calendar" ? "Copy today's slate with tagged picks" : "Export record, chart, and last 10 plays";
+
   return (
     <div className="ts-app" style={{ minHeight:"100vh", background:C.paper, color:C.ink, fontFamily:SANS }}>
       <style>{RESPONSIVE_CSS}</style>
@@ -3949,27 +3939,25 @@ export default function App() {
             <div style={{ display:"flex", alignItems:"center", gap:12 }}>
               <h1 style={{ margin:0, fontFamily:SANS, fontWeight:800, fontSize:34,
                 letterSpacing:"-0.02em", lineHeight:1 }}>MLB</h1>
-              {tab==="calendar" && cal && cal.copySlate && (
-                <button onClick={()=>cal.copySlate()}
-                  aria-label="Copy today's slate"
-                  title={cal.slateCopied==="empty" ? "No tagged picks today — hit Play on a game first"
-                    : cal.slateCopied==="err" ? "Copy failed — try again"
-                    : "Copy today's slate with tagged picks"}
+              {exportFn && (
+                <button onClick={()=>exportFn()}
+                  aria-label={tab==="calendar" ? "Copy today's slate" : "Export track record"}
+                  title={exportTitle}
                   style={{ width:30, height:30, borderRadius:5,
-                    border:`1px solid ${cal.slateCopied==="ok"?C.over
-                      : (cal.slateCopied==="empty"||cal.slateCopied==="err") ? C.under : C.ink}`,
-                    background:cal.slateCopied==="ok"?C.over
-                      : (cal.slateCopied==="empty"||cal.slateCopied==="err") ? C.under : "#fff",
-                    color:cal.slateCopied==="ok"||cal.slateCopied==="empty"||cal.slateCopied==="err" ? "#fff" : C.ink,
+                    border:`1px solid ${exportStatus==="ok"?C.over
+                      : (exportStatus==="empty"||exportStatus==="err") ? C.under : C.ink}`,
+                    background:exportStatus==="ok"?C.over
+                      : (exportStatus==="empty"||exportStatus==="err") ? C.under : "#fff",
+                    color:exportStatus==="ok"||exportStatus==="empty"||exportStatus==="err" ? "#fff" : C.ink,
                     cursor:"pointer",
                     display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0,
                     padding:0 }}>
-                  {cal.slateCopied==="ok" ? (
+                  {exportStatus==="ok" ? (
                     <svg width="15" height="15" viewBox="0 0 24 24" fill="none">
                       <path d="M5 13l4 4L19 7" stroke="#fff" strokeWidth="2.4"
                         strokeLinecap="round" strokeLinejoin="round"/>
                     </svg>
-                  ) : (cal.slateCopied==="empty" || cal.slateCopied==="err") ? (
+                  ) : (exportStatus==="empty" || exportStatus==="err") ? (
                     <svg width="15" height="15" viewBox="0 0 24 24" fill="none">
                       <path d="M6 6l12 12M18 6L6 18" stroke="#fff" strokeWidth="2.4" strokeLinecap="round"/>
                     </svg>
@@ -4043,7 +4031,7 @@ export default function App() {
             unmounted — so switching tabs never throws away the calendar's
             already-loaded schedule/stats and forces a refetch */}
         <div style={{ display: tab==="tags" ? "block" : "none" }}>
-          <TagsView tags={tags} setResult={setResult} setStarred={setStarred} />
+          <TagsView tags={tags} setResult={setResult} setStarred={setStarred} onReady={setPlaysApi} />
         </div>
         <div style={{ display: tab==="calendar" ? "block" : "none" }}>
           <TravelTrends tags={tags} setTag={setTag} onReady={setCal} />
