@@ -2236,7 +2236,7 @@ function PitcherBlock({ name, pid, vsName, info, oppTeamId, date, bare }) {
 
 // one pitcher's line in the game's box score — name opens the same season
 // game-log modal as everywhere else.
-function PitcherStatLine({ p }) {
+function PitcherStatLine({ p, final }) {
   const [showLog, setShowLog] = useState(false);
   // same season-average context the season game-log modal colors its rows
   // against, so this game's line and that modal agree on what's good/bad.
@@ -2248,12 +2248,21 @@ function PitcherStatLine({ p }) {
   }, [p.pid]);
   return (
     <div>
-      <button onClick={()=>setShowLog(true)} title={`${p.name} — ${SEASON} game log`}
-        style={{ font:"inherit", fontFamily:SANS, fontSize:13, fontWeight:700, color:C.blue,
-          cursor:"pointer", border:"none", background:"transparent", padding:0,
-          textDecoration:"underline", textDecorationColor:C.blue, textUnderlineOffset:2,
-          display:"block", maxWidth:"100%", textAlign:"left", whiteSpace:"nowrap",
-          overflow:"hidden", textOverflow:"ellipsis" }}>{p.name}</button>
+      <div style={{ display:"flex", alignItems:"baseline", gap:6, minWidth:0 }}>
+        <button onClick={()=>setShowLog(true)} title={`${p.name} — ${SEASON} game log`}
+          style={{ font:"inherit", fontFamily:SANS, fontSize:13, fontWeight:700, color:C.blue,
+            cursor:"pointer", border:"none", background:"transparent", padding:0,
+            textDecoration:"underline", textDecorationColor:C.blue, textUnderlineOffset:2,
+            textAlign:"left", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis",
+            minWidth:0, flexShrink:1 }}>{p.name}</button>
+        {/* season ERA, box-score style — only once the game (and so this
+            line) is actually final, not while still live */}
+        {final && season?.era!=null && (
+          <span style={{ fontFamily:MONO, fontSize:11, color:C.inkSoft, flexShrink:0 }}>
+            {season.era.toFixed(2)} ERA
+          </span>
+        )}
+      </div>
       <div style={{ marginTop:2 }}>
         <PLine s={{ stat:p.stat }} season={season} maxSize={13} />
       </div>
@@ -2701,7 +2710,7 @@ async function loadBatterVs(batterId, pitcherId) {
 
 /* one team's column: lineup of 9 hitters, then its starting pitcher block below */
 const HV_COLS = "14px minmax(40px,1fr) 34px 34px 30px 48px";   // # name AB H HR AVG
-function TeamPanel({ teamName, lineup, oppName, pitcherName, pitcherId, pitcherInfo, onStat, oppPitcherName, oppPitcherId, oppTeamId, date, showBoxPitching, boxPitchers }) {
+function TeamPanel({ teamName, lineup, oppName, pitcherName, pitcherId, pitcherInfo, onStat, oppPitcherName, oppPitcherId, oppTeamId, date, showBoxPitching, boxPitchers, final }) {
   const canVs = !!oppPitcherId && !!oppPitcherName;
   // null = neither tab open, nothing shown yet — tapping a tab opens it,
   // tapping the already-open tab closes it again (accordion, not a toggle
@@ -2843,7 +2852,7 @@ function TeamPanel({ teamName, lineup, oppName, pitcherName, pitcherId, pitcherI
             ) : (
               <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
                 <PLineHeader />
-                {boxPitchers.map(p => <PitcherStatLine key={p.pid} p={p} />)}
+                {boxPitchers.map(p => <PitcherStatLine key={p.pid} p={p} final={final} />)}
               </div>
             )}
           </>
@@ -3338,14 +3347,14 @@ function GameModal({ m, tags, setTag, now, onClose }) {
             lineup={awayLU} pitcherName={g.awayPname} pitcherId={g.awayPid} pitcherInfo={awayP}
             oppPitcherName={g.homePname} oppPitcherId={g.homePid}
             oppTeamId={g.homeId} date={date}
-            showBoxPitching={showBoxPitching} boxPitchers={boxPitching?.away}
+            showBoxPitching={showBoxPitching} boxPitchers={boxPitching?.away} final={final}
             onStat={(name,stat)=>setPick({ name, stat, ts:Date.now() })} />
           <div style={{ borderLeft:`1px solid ${C.rule}` }} className="ts-h2h-divider">
             <TeamPanel teamName={g.homeName} oppName={g.awayName}
               lineup={homeLU} pitcherName={g.homePname} pitcherId={g.homePid} pitcherInfo={homeP}
               oppPitcherName={g.awayPname} oppPitcherId={g.awayPid}
               oppTeamId={g.awayId} date={date}
-              showBoxPitching={showBoxPitching} boxPitchers={boxPitching?.home}
+              showBoxPitching={showBoxPitching} boxPitchers={boxPitching?.home} final={final}
               onStat={(name,stat)=>setPick({ name, stat, ts:Date.now() })} />
           </div>
         </div>
