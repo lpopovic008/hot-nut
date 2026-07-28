@@ -2256,9 +2256,10 @@ function PitcherStatLine({ p, final }) {
             textAlign:"left", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis",
             minWidth:0, flexShrink:1 }}>{p.name}</button>
         {/* season ERA, box-score style — only once the game (and so this
-            line) is actually final, not while still live */}
+            line) is actually final, not while still live. Pinned to the
+            right edge of the pitching box, in line with the name. */}
         {final && season?.era!=null && (
-          <span style={{ fontFamily:MONO, fontSize:11, color:C.inkSoft, flexShrink:0 }}>
+          <span style={{ fontFamily:MONO, fontSize:11, color:C.inkSoft, flexShrink:0, marginLeft:"auto" }}>
             {season.era.toFixed(2)} ERA
           </span>
         )}
