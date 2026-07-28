@@ -218,7 +218,7 @@ const fmtTime = (iso) => { try { return new Date(iso).toLocaleTimeString([], { h
 // Draw the tagged play as green monospace "code" text, right-aligned at
 // (rightX, cy) — matching today's-slate's terminal look instead of the old
 // red marker handwriting. Shrinks to fit maxW if needed, no rotation.
-function drawGreenTag(x, text, leftX, cy, maxW, fontSize = 14) {
+function drawGreenTag(x, text, leftX, cy, maxW, fontSize = 14, color = "#39D98A") {
   if (!text) return;
   x.save();
   let size = fontSize;
@@ -227,7 +227,7 @@ function drawGreenTag(x, text, leftX, cy, maxW, fontSize = 14) {
     size -= 0.5;
     x.font = `700 ${size}px ${MONO}`;
   }
-  x.fillStyle = "#39D98A";
+  x.fillStyle = color;
   x.textAlign = "left"; x.textBaseline = "middle";
   x.fillText(text, leftX, cy);
   x.restore();
@@ -286,8 +286,7 @@ const stripPlayPrefix = (t) => (t||"").replace(/^\s*play\s*[·:\-–]?\s*/i, "")
 
 // hand-drawn line chart for the exported plays card — mirrors the live
 // Recharts "cumulative net" chart (dashed zero line, dots only at local
-// highs/lows, a trailing net-value label) without pulling Recharts into a
-// raster export.
+// highs/lows) without pulling Recharts into a raster export.
 function drawNetChart(x, left, top, w, h, data, dotIdx) {
   roundedRectPath(x, left, top, w, h, 4);
   x.fillStyle = "#fff"; x.fill();
@@ -319,60 +318,13 @@ function drawNetChart(x, left, top, w, h, data, dotIdx) {
     x.beginPath(); x.arc(xAt(i), yAt(d.net), 2.5, 0, Math.PI*2);
     x.fillStyle = "#2B4C7E"; x.fill();
   });
-  const last = data[data.length-1];
-  const lastColor = last.net>0 ? "#1B7F5C" : last.net<0 ? "#D7263D" : "#525A66";
-  x.fillStyle = lastColor; x.font = `700 12px ${MONO}`;
-  x.textAlign = "right"; x.textBaseline = "alphabetic";
-  x.fillText(`${last.net>0?"+":""}${last.net}`, cx1, Math.max(top+13, yAt(last.net)-8));
-}
-
-// a simple box blur over raw ImageData — used instead of the canvas'
-// built-in `ctx.filter = "blur()"` because on this engine, once ANY
-// stroke() has been called on a canvas, ctx.filter silently stops applying
-// to everything drawn on it afterward (a real rendering bug, reproduced in
-// isolation: a single strokeRect() call permanently breaks later filtered
-// fillText on that same context). Operating on the pixel buffer directly
-// sidesteps it entirely.
-function boxBlurImageData(imageData, radius) {
-  const { data, width, height } = imageData;
-  const src = new Uint8ClampedArray(data);
-  for (let y=0; y<height; y++) {
-    for (let px=0; px<width; px++) {
-      let r=0, g=0, b=0, a=0, n=0;
-      for (let dy=-radius; dy<=radius; dy++) {
-        const yy = y+dy; if (yy<0 || yy>=height) continue;
-        for (let dx=-radius; dx<=radius; dx++) {
-          const xx = px+dx; if (xx<0 || xx>=width) continue;
-          const i = (yy*width+xx)*4;
-          r+=src[i]; g+=src[i+1]; b+=src[i+2]; a+=src[i+3]; n++;
-        }
-      }
-      const o = (y*width+px)*4;
-      data[o]=r/n; data[o+1]=g/n; data[o+2]=b/n; data[o+3]=a/n;
-    }
-  }
-  return imageData;
-}
-
-// draws onto a small offscreen canvas via `drawFn(offscreenCtx)`, blurs the
-// result with boxBlurImageData, then composites it onto the destination
-// context at (dx,dy) — a drop-in "draw this, but blurred" for exports.
-function drawBlurredOnto(destCtx, dx, dy, w, h, scale, radius, drawFn) {
-  const off = document.createElement("canvas");
-  off.width = Math.ceil(w*scale); off.height = Math.ceil(h*scale);
-  const octx = off.getContext("2d");
-  octx.scale(scale, scale);
-  drawFn(octx);
-  const imgData = octx.getImageData(0, 0, off.width, off.height);
-  boxBlurImageData(imgData, radius);
-  octx.putImageData(imgData, 0, 0);
-  destCtx.drawImage(off, dx, dy, w, h);
 }
 
 // one row of the exported "last 10 plays" list. A play that hasn't been
 // graded yet still shows — matchup and the game's date stay legible — but
-// the pick text and its exact first-pitch time are blurred out, so sharing
-// the export before a play has settled doesn't give away the pick itself.
+// the pick text and its exact first-pitch time are redacted behind a solid
+// black bar (with black text drawn on top of it) so nothing is legible
+// until the play is graded.
 function drawPlaysRow(x, left, top, w, h, r) {
   const graded = r.result==="W" || r.result==="L" || r.result==="P";
   const tint = r.result==="W" ? "rgba(27,127,92,0.10)"
@@ -400,20 +352,15 @@ function drawPlaysRow(x, left, top, w, h, r) {
   const playMaxW = Math.max(20, (dateTimeRight-dateTimeW) - playStartX);
   const playText = stripPlayPrefix(r.text);
 
-  // the indicator box strokes an outline when ungraded — draw it (along with
-  // everything else above) BEFORE any blurred drawImage compositing below.
-  // On this engine, a stroke() called AFTER a blurred drawImage() onto the
-  // same canvas silently un-blurs it retroactively (reproduced in isolation);
-  // strokes that happen first, or on a later row, don't cause this.
   drawPlayIndicator(x, r.result, indicatorX, top+h/2-8, 16);
 
   if (graded) {
-    drawGreenTag(x, playText, playStartX, cy, playMaxW, 12);
+    drawGreenTag(x, playText, playStartX, cy, playMaxW, 12, C.ink);
   } else {
     const padB = 6;
-    drawBlurredOnto(x, playStartX-padB, top, playMaxW+padB*2, h, 3, 3, (octx)=>{
-      drawGreenTag(octx, playText, padB, h/2, playMaxW, 12);
-    });
+    roundedRectPath(x, playStartX-padB, top+4, playMaxW+padB*2, h-8, 3);
+    x.fillStyle = C.ink; x.fill();
+    drawGreenTag(x, playText, playStartX, cy, playMaxW, 12, C.ink);
   }
 
   const dateStr = r.date ? calDay(r.date).md : "";
@@ -424,12 +371,11 @@ function drawPlaysRow(x, left, top, w, h, r) {
   if (graded) {
     x.fillText(timeStr, dateTimeRight, cy+6);
   } else if (timeStr) {
-    const padB = 6;
-    drawBlurredOnto(x, dateTimeRight-dateTimeW-padB, cy, dateTimeW+padB*2, 14, 3, 2, (octx)=>{
-      octx.textAlign = "right"; octx.textBaseline = "middle";
-      octx.fillStyle = "#9AA3AD"; octx.font = `10px ${MONO}`;
-      octx.fillText(timeStr, dateTimeW+padB, 7);
-    });
+    const padB = 4;
+    roundedRectPath(x, dateTimeRight-dateTimeW-padB, cy, dateTimeW+padB*2, 14, 3);
+    x.fillStyle = C.ink; x.fill();
+    x.fillStyle = C.ink; x.font = `10px ${MONO}`;
+    x.fillText(timeStr, dateTimeRight, cy+7);
   }
 }
 
@@ -3613,7 +3559,7 @@ function TagsView({ tags, setResult, setStarred, onReady }) {
       });
 
       // force a full synchronous readback/repaint of the finished canvas
-      // before handing it to copyCanvas — see drawBlurredOnto's comment
+      // before handing it to copyCanvas
       x.putImageData(x.getImageData(0, 0, cv.width, cv.height), 0, 0);
       copyCanvas(cv, `mlb-plays-${todayISO()}.png`, setPlaysCopied);
     } catch (e) {
