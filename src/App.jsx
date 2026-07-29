@@ -1321,35 +1321,39 @@ function TravelTrends({ tags, setTag, onReady }) {
       return r1>=10 && r2>=10;
     };
 
-    // this team's last 3 games' quality-adjusted batting score (0-10),
-    // left-to-right oldest to most recent — feeds the 3 batter boxes. Scans
-    // by exact prior game start time (not date) so an off-day doesn't leave
-    // a box blank and a doubleheader's earlier game still counts as the
-    // later game's own "previous game" instead of being skipped entirely;
-    // the actual value shown comes from battingScoreMap.
+    // this team's last 5 games' quality-adjusted batting score (0-10) plus
+    // the actual hit count, left-to-right oldest to most recent — feeds the
+    // 5 batter boxes in the game modal. Scans by exact prior game start time
+    // (not date) so an off-day doesn't leave a box blank and a doubleheader's
+    // earlier game still counts as the later game's own "previous game"
+    // instead of being skipped entirely; the actual values come from
+    // battingScoreMap/hitsMap.
     //
-    // only this team's NEXT still-to-be-played game shows the trio at all —
+    // only this team's NEXT still-to-be-played game shows the line at all —
     // any other, further-out future game just shows the "–" placeholder
     // (same look as still-loading) instead of repeating the same numbers on
     // every card in a homestand. As a game finishes, the team's "next game"
     // shifts forward (a later doubleheader leg today, or tomorrow's game)
-    // and picks up the trio there. Already-played/in-progress games are
+    // and picks up the line there. Already-played/in-progress games are
     // unaffected. Goes by each game's own tracked status (isFinal/isLive),
     // not a wall-clock comparison — a doubleheader's early leg can already
     // be Final well before its late leg's own scheduled time arrives, and
     // the late leg is still that team's own "next game up" despite that.
-    const hitsTrio = (tid) => {
+    const hitsLine = (tid) => {
+      const empty = [null,null,null,null,null].map(()=>({ score:null, hits:null }));
       if (!g.isFinal && !g.isLive) {
         const sched = scheduleMap[tid];
         const nextUp = sched && sched.find(s => !s.isFinal);
-        if (nextUp && nextUp.gamePk !== g.gamePk) return [null, null, null];
+        if (nextUp && nextUp.gamePk !== g.gamePk) return empty;
       }
       const m = hitsMap[tid];
-      if (!m) return [null, null, null];
+      if (!m) return empty;
       const scores = battingScoreMap[tid] || {};
       const priorTimes = Object.keys(m).filter(t => t < g.time).sort().reverse();
-      const at = (i) => priorTimes[i]!=null ? (scores[priorTimes[i]] ?? null) : null;
-      return [at(2), at(1), at(0)];
+      const at = (i) => priorTimes[i]!=null
+        ? { score: scores[priorTimes[i]] ?? null, hits: m[priorTimes[i]] ?? null }
+        : { score:null, hits:null };
+      return [at(4), at(3), at(2), at(1), at(0)];
     };
 
     // per-team keys for the 2x2 situational-trend grid
@@ -1369,7 +1373,7 @@ function TravelTrends({ tags, setTag, onReady }) {
       rematchVerdict:(tid)=>rematchVerdict[tid] || null,
       pitcherEra,
       bigDayStreak,
-      hitsTrio };
+      hitsLine };
   };
 
   return (
@@ -1457,8 +1461,7 @@ function Legend() {
    the pitcher/batter numbers are plain text but keep this same slot width
    so everything still lines up under the PITCHER/BATTER headers. */
 const BOX_W = 14, BOX_H = 13, BOX_GAP = 1.5;
-const PB_BOX_W = 21, PB_GAP = 2;
-const ERA_BOX_W = 26;   // wider than PB_BOX_W — "12.34" needs ~24px at this font, hits never do
+const ERA_BOX_W = 26;   // "12.34" needs ~24px at this font, hits never do
 const MAIN_H = 19;                         // a team's row height
 const BASES_W = 26;                        // reserved for the live bases display — never shifts
 const CARD_H = 58;
@@ -1526,30 +1529,45 @@ function EraNum({ era, verdict, dark }) {
   );
 }
 
-/* one of the team's last 3 games' quality-adjusted batting score (0-10, 5.0
+/* one of the team's last 5 games' quality-adjusted batting score (0-10, 5.0
    = exactly the times-on-base + total-bases production the pitching staff
-   they faced that day would be expected to allow), no border around it,
-   just a soft highlight fill. The most recent game matches the score's
-   font/size; the two before it match the game box's own hits column (small
-   mono, muted gray). Soft green at 7.0+ ("hot" — meaningfully more
-   production than expected), soft red at 3.0 or below ("cold" —
-   meaningfully less) — the text itself always stays its resting color,
-   never tinted. */
-function BatScoreNum({ score, big=false, dark }) {
+   they faced that day would be expected to allow) with the game's actual
+   hit count underneath it. No border, just a soft highlight fill on the
+   score. Soft green at 7.0+ ("hot"), soft red at 3.0 or below ("cold") — the
+   text itself always stays its resting color, never tinted. The most recent
+   game is drawn in the largest size; older games step down in two tiers. */
+function BattingBox({ score, hits, scoreSize, hitsSize, emphasize }) {
   const has = score != null;
-  const bg = has && score>=7.0 ? (dark?C.darkSoftOver:C.softOver)
-    : has && score<=3.0 ? (dark?C.darkSoftUnder:C.softUnder) : "transparent";
-  const restColor = dark ? C.darkTextSoft : C.ruleDark;
-  const color = has ? (big ? (dark?C.darkText:C.ink) : restColor) : restColor;
+  const bg = has && score>=7.0 ? C.softOver : has && score<=3.0 ? C.softUnder : "transparent";
+  const color = has ? (emphasize ? C.ink : C.ruleDark) : C.ruleDark;
   // "10.0" (the one 4-char case, at the very top of the scale) doesn't fit
   // this box at this font size even with the dot tightened up — drop the
   // decimal just for that ceiling value rather than widen the box.
   const label = has ? (score.toFixed(1)==="10.0" ? "10" : score.toFixed(1)) : "–";
   return (
-    <span title={big ? "Batting score, last game" : "Batting score"} style={{ width:PB_BOX_W, flexShrink:0,
-      textAlign:"center", fontFamily:MONO, fontSize: big?13:10,
-      fontWeight: big?700:400, color,
-      background:bg, borderRadius:3, transition:"background 0.4s ease, color 0.4s ease" }}>{has ? <TightDecimal text={label} /> : "–"}</span>
+    <div title={emphasize ? "Batting score, last game (hits below)" : "Batting score (hits below)"}
+      style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:1, flex:1, minWidth:0,
+        background:bg, borderRadius:3, padding:"2px 2px",
+        transition:"background 0.4s ease, color 0.4s ease" }}>
+      <span style={{ fontFamily:MONO, fontSize:scoreSize, fontWeight:emphasize?700:400, color,
+        whiteSpace:"nowrap" }}>{has ? <TightDecimal text={label} /> : "–"}</span>
+      <span style={{ fontFamily:MONO, fontSize:hitsSize, color:C.ruleDark,
+        whiteSpace:"nowrap" }}>{hits!=null ? hits : "–"}</span>
+    </div>
+  );
+}
+// oldest → newest sizing tiers: games 4-5-back smallest, 2-3-back medium,
+// most recent largest — applied to both the score and the hits number.
+const BAT5_SCORE_SIZES = [9, 9, 10.5, 10.5, 13];
+const BAT5_HITS_SIZES  = [7, 7, 7.5, 7.5, 9];
+/* one team's last 5 games — score-over-hits, oldest to newest — shown
+   underneath its starting-pitcher box and above its lineup. */
+function BattingFive({ games }) {
+  return (
+    <div style={{ display:"flex", alignItems:"flex-end", gap:3 }}>
+      {games.map((gm,i) => <BattingBox key={i} score={gm.score} hits={gm.hits}
+        scoreSize={BAT5_SCORE_SIZES[i]} hitsSize={BAT5_HITS_SIZES[i]} emphasize={i===games.length-1} />)}
+    </div>
   );
 }
 
@@ -1570,18 +1588,17 @@ function TrendBox({ present, color, title, inner, dark }) {
   );
 }
 
-const TREND_CHIP_W = 62;
-
 /* the game-modal version of TrendBox — same slot order/colors as the
    homepage schedule's grid, but wide enough to spell the label out instead
    of just lighting a colored square, since there's room here that the
-   calendar card doesn't have. */
+   calendar card doesn't have. Flexible width so a team's 6 chips always
+   span exactly its half of the indicator row, on any viewport. */
 function TrendChip({ slot, present }) {
   return (
-    <span title={slot.desc} style={{ width:TREND_CHIP_W, flexShrink:0, boxSizing:"border-box",
-      fontFamily:MONO, fontSize:8.5, fontWeight:700, textAlign:"center",
+    <span title={slot.desc} style={{ flex:1, minWidth:0, boxSizing:"border-box",
+      fontFamily:MONO, fontSize:8, fontWeight:700, textAlign:"center",
       whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis",
-      padding:"3px 4px", borderRadius:3,
+      padding:"3px 2px", borderRadius:3,
       background: present ? slot.color : "transparent",
       color: present ? "#fff" : C.ruleDark,
       border: present ? "none" : `1px solid ${C.rule}` }}>
@@ -1590,30 +1607,23 @@ function TrendChip({ slot, present }) {
   );
 }
 
-/* last-3-games batting score trio, on its own (no ERA box next to it —
-   that's already shown elsewhere in the modal, on the pitching line). */
-function BattingTrio({ h3, h2, h1 }) {
-  return (
-    <div style={{ display:"flex", alignItems:"baseline", gap:PB_GAP, flexShrink:0 }}>
-      <BatScoreNum score={h3} />
-      <BatScoreNum score={h2} />
-      <BatScoreNum score={h1} big />
-    </div>
-  );
-}
-
-/* one team's line in the game modal: batting trio on the left, this game's
-   situational-trend indicators typed out (not just colored boxes) in the
-   homepage grid's own fixed slot order on the right. */
-function TrendRow({ tid, t }) {
-  const [h3, h2, h1] = t.hitsTrio(tid);
-  const keys = t.keysFor(tid);
-  return (
-    <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:10, flexWrap:"wrap" }}>
-      <BattingTrio h3={h3} h2={h2} h1={h1} />
-      <div style={{ display:"flex", gap:4 }}>
+/* full-width row of this game's situational-trend indicators, split into
+   the away team's 6 slots (left half) and the home team's 6 slots (right
+   half) — together spanning the whole modal width, one continuous strip of
+   12 chips lined up with the away/home columns below. */
+function TrendIndicatorRow({ t, awayId, homeId }) {
+  const half = (tid) => {
+    const keys = t.keysFor(tid);
+    return (
+      <div style={{ display:"flex", gap:3, flex:1, minWidth:0 }}>
         {TREND_SLOTS.map(slot => <TrendChip key={slot.key} slot={slot} present={keys.has(slot.key)} />)}
       </div>
+    );
+  };
+  return (
+    <div style={{ display:"flex", gap:8, padding:"10px 18px 2px" }}>
+      {half(awayId)}
+      {half(homeId)}
     </div>
   );
 }
@@ -2178,24 +2188,31 @@ function PitcherSeasonModal({ pid, name, onClose, upcoming }) {
     </div>
   );
 }
-// pitcher name + matchup only — click the name to check their full season
-// log (which highlights this exact rematch, if any) in PitcherSeasonModal.
-function PitcherBlock({ name, pid, vsName, oppTeamId, date, bare }) {
+// pitcher name + matchup + season ERA, styled for the dark starting-pitcher
+// box — click the name to check their full season log (which highlights
+// this exact rematch, if any) in PitcherSeasonModal.
+function PitcherBlock({ name, pid, vsName, era, oppTeamId, date, bare }) {
   const [showLog, setShowLog] = useState(false);
   return (
-    <div style={ bare ? {} : { borderTop:`1px solid ${C.rule}`, padding:"12px 0" }}>
-      <div style={{ fontFamily:SANS, fontSize:15, fontWeight:700 }}>
-        {!name ? "TBD" : pid ? (
-          <button onClick={()=>setShowLog(true)} title={`${name} — ${SEASON} game log`}
-            style={{ font:"inherit", fontWeight:700, color:C.blue, cursor:"pointer",
-              border:"none", background:"transparent", padding:0,
-              textDecoration:"underline", textDecorationColor:C.blue, textUnderlineOffset:2 }}>{name}</button>
-        ) : name}
-        <span style={{ fontFamily:MONO, fontSize:11, color:C.inkSoft, fontWeight:400 }}>
-          {"  vs "}{vsName}</span>
+    <div style={ bare ? {} : { borderTop:`1px solid ${C.darkBorder}`, padding:"12px 0" }}>
+      <div style={{ display:"flex", alignItems:"baseline", justifyContent:"space-between", gap:8 }}>
+        <div style={{ fontFamily:SANS, fontSize:15, fontWeight:700, minWidth:0 }}>
+          {!name ? <span style={{ color:C.darkTextSoft }}>TBD</span> : pid ? (
+            <button onClick={()=>setShowLog(true)} title={`${name} — ${SEASON} game log`}
+              style={{ font:"inherit", fontWeight:700, color:C.darkText, cursor:"pointer",
+                border:"none", background:"transparent", padding:0,
+                textDecoration:"underline", textDecorationColor:C.darkText, textUnderlineOffset:2 }}>{name}</button>
+          ) : <span style={{ color:C.darkText }}>{name}</span>}
+          <span style={{ fontFamily:MONO, fontSize:11, color:C.darkTextSoft, fontWeight:400 }}>
+            {"  vs "}{vsName}</span>
+        </div>
+        {name && (
+          <span style={{ fontFamily:MONO, fontSize:15, fontWeight:700, color:C.darkText, flexShrink:0 }}>
+            {era!=null ? era.toFixed(2) : "–"}</span>
+        )}
       </div>
       {!name && (
-        <div style={{ fontFamily:SANS, fontSize:13, color:C.inkSoft, marginTop:4 }}>
+        <div style={{ fontFamily:SANS, fontSize:13, color:C.darkTextSoft, marginTop:4 }}>
           No probable starter posted yet.</div>
       )}
       {showLog && <PitcherSeasonModal pid={pid} name={name} onClose={()=>setShowLog(false)}
@@ -2665,18 +2682,35 @@ async function loadBatterVs(batterId, pitcherId) {
 
 /* one team's column: lineup of 9 hitters, then its starting pitcher block below */
 const HV_COLS = "14px minmax(40px,1fr) 34px 34px 30px 48px";   // # name AB H HR AVG
-function TeamPanel({ teamName, lineup, oppName, pitcherName, pitcherId, onStat, oppPitcherName, oppPitcherId, oppTeamId, date, showBoxPitching, boxPitchers, final }) {
+function TeamPanel({ teamName, lineup, oppName, pitcherName, pitcherId, era, battingLine, onStat, oppPitcherName, oppPitcherId, oppTeamId, date, showBoxPitching, boxPitchers, final }) {
   const canVs = !!oppPitcherId && !!oppPitcherName;
+  // the manually-added "bulk pitcher" (see AddPitcherBlock) is controlled
+  // here, not inside that component, so it can also unlock its own
+  // "vs [name]" lineup tab below.
+  const [addedPitcher, setAddedPitcher] = useState(null);   // { id, name }
   // null = neither tab open, nothing shown yet — tapping a tab opens it,
   // tapping the already-open tab closes it again (accordion, not a toggle
   // between two always-visible views). Only the batting lineup collapses
   // like this; the starting-pitcher/box-score pitching block above it is
   // always shown regardless of `view`.
-  const [view, setView] = useState(null);         // null | "last5" | "vssp"
-  const [vsData, setVsData] = useState({});       // batterId -> stat | null
+  const [view, setView] = useState(null);         // null | "last5" | "vssp" | "vsadded"
+  const [vsData, setVsData] = useState({});       // batterId -> stat | null, vs the opposing starter
   const [vsLoading, setVsLoading] = useState(false);
+  const [vsDataAdded, setVsDataAdded] = useState({});   // batterId -> stat | null, vs the added pitcher
+  const [vsLoadingAdded, setVsLoadingAdded] = useState(false);
 
-  // lazy-load batter-vs-pitcher lines the first time the toggle flips
+  // adding or dropping the bulk pitcher invalidates any cached "vs him"
+  // data, and (dropping only) bumps the viewer off that tab if it was open
+  // — done here, synchronously alongside setAddedPitcher itself, rather
+  // than reactively in an effect.
+  const handleSetAddedPitcher = (val) => {
+    setAddedPitcher(val);
+    setVsDataAdded({});
+    setVsLoadingAdded(false);
+    if (!val && view==="vsadded") setView(null);
+  };
+
+  // lazy-load batter-vs-pitcher lines the first time each tab flips open
   useEffect(() => {
     if (view !== "vssp" || !canVs || !lineup?.players?.length) return;
     let alive = true;
@@ -2690,6 +2724,23 @@ function TeamPanel({ teamName, lineup, oppName, pitcherName, pitcherId, onStat, 
     })();
     return () => { alive = false; };
   }, [view, canVs, oppPitcherId, lineup]);
+
+  useEffect(() => {
+    if (view !== "vsadded" || !addedPitcher || !lineup?.players?.length) return;
+    let alive = true;
+    setVsLoadingAdded(true);
+    (async () => {
+      const data = {};
+      await mapPool(lineup.players, 4, async p=>{
+        data[p.id] = await loadBatterVs(p.id, addedPitcher.id);
+      });
+      if (alive) { setVsDataAdded(data); setVsLoadingAdded(false); }
+    })();
+    return () => { alive = false; };
+  }, [view, addedPitcher, lineup]);
+
+  const activeVsData = view === "vsadded" ? vsDataAdded : vsData;
+  const activeVsLoading = view === "vsadded" ? vsLoadingAdded : vsLoading;
 
   const tabBtn = (id,label,enabled=true) => (
     <button onClick={()=>enabled&&setView(v=>v===id?null:id)} disabled={!enabled}
@@ -2710,9 +2761,12 @@ function TeamPanel({ teamName, lineup, oppName, pitcherName, pitcherId, onStat, 
       </div>
 
       {/* starting pitcher (upcoming games) or the full game's pitching line
-          (live/finished games) — shown above the lineup */}
+          (live/finished games) — shown above the lineup. Dark, matching the
+          calendar's own dark card shade, for the pre-game view; the
+          box-score view keeps its light background. */}
       <div style={{ margin:"10px 10px 6px", padding:"10px 12px", borderRadius:3,
-        background:"#fff", border:`1px solid ${C.rule}` }}>
+        background: showBoxPitching ? "#fff" : "#20232A",
+        border:`1px solid ${showBoxPitching ? C.rule : C.darkBorder}` }}>
         {showBoxPitching ? (
           <>
             <div style={{ fontFamily:MONO, fontSize:9, letterSpacing:"0.12em", textTransform:"uppercase",
@@ -2730,19 +2784,22 @@ function TeamPanel({ teamName, lineup, oppName, pitcherName, pitcherId, onStat, 
           </>
         ) : (
           <>
-            <div style={{ fontFamily:MONO, fontSize:9, letterSpacing:"0.12em", textTransform:"uppercase",
-              color:C.ruleDark, marginBottom:4 }}>Starting pitcher</div>
-            <PitcherBlock name={pitcherName} pid={pitcherId} vsName={oppName} oppTeamId={oppTeamId} date={date} bare />
+            <PitcherBlock name={pitcherName} pid={pitcherId} vsName={oppName} era={era} oppTeamId={oppTeamId} date={date} bare />
             {/* the probable "starter" is sometimes just a 1-2 inning opener —
                 let the viewer look up the actual bulk pitcher alongside them */}
-            <AddPitcherBlock oppName={oppName} oppTeamId={oppTeamId} date={date} />
+            <AddPitcherBlock oppName={oppName} oppTeamId={oppTeamId} date={date}
+              added={addedPitcher} setAdded={handleSetAddedPitcher} />
           </>
         )}
       </div>
 
+      {/* last 5 games' batting score + actual hits, above the lineup */}
+      {battingLine && <div style={{ margin:"0 10px 8px" }}><BattingFive games={battingLine} /></div>}
+
       {/* view toggle */}
       <div style={{ display:"flex", gap:3, padding:"6px 10px 2px", borderBottom:`1px solid #EEF0F2` }}>
         {tabBtn("vssp", canVs ? `vs ${oppPitcherName.split(" ").slice(-1)[0]}` : "vs SP", canVs)}
+        {addedPitcher && tabBtn("vsadded", `vs ${addedPitcher.name.split(" ").slice(-1)[0]}`)}
         {tabBtn("last5","Last 5")}
       </div>
 
@@ -2789,15 +2846,15 @@ function TeamPanel({ teamName, lineup, oppName, pitcherName, pitcherId, onStat, 
             </div>
             );
           }
-          // vs-pitcher view
-          const st = vsData[p.id];
+          // vs-pitcher view (either the opposing starter, or the added bulk pitcher)
+          const st = activeVsData[p.id];
           return (
           <div key={p.id} style={{ display:"grid", gridTemplateColumns:HV_COLS, gap:6,
             padding:"3px 10px", alignItems:"center", borderTop:`1px solid #EEF0F2` }}>
             <span style={{ fontFamily:MONO, fontSize:11, color:C.ruleDark }}>{p.order}</span>
             <span style={{ fontFamily:SANS, fontSize:12.5, whiteSpace:"nowrap",
               overflow:"hidden", textOverflow:"ellipsis" }} title={p.name}>{p.name}</span>
-            {vsLoading && !st ? (
+            {activeVsLoading && !st ? (
               <span style={{ gridColumn:"3 / span 4", fontFamily:MONO, fontSize:10,
                 color:C.ruleDark, textAlign:"right" }}>…</span>
             ) : !st || Number(st.atBats)===0 ? (
@@ -2828,13 +2885,25 @@ function TeamPanel({ teamName, lineup, oppName, pitcherName, pitcherId, onStat, 
 
 /* lets the viewer manually add a second pitcher's info next to the
    probable starter — for when the listed "starter" is really just an
-   opener going 1-2 innings and the actual bulk pitcher is someone else. */
-function AddPitcherBlock({ oppName, oppTeamId, date }) {
+   opener going 1-2 innings and the actual bulk pitcher is someone else.
+   `added`/`setAdded` are controlled from TeamPanel so it can also surface a
+   "vs [added pitcher]" lineup tab once one is added. Styled for the dark
+   pitcher box it lives in. */
+function AddPitcherBlock({ oppName, oppTeamId, date, added, setAdded }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
-  const [added, setAdded] = useState(null);      // { id, name }
+  const [era, setEra] = useState(null);
+
+  useEffect(() => {
+    // nothing to reset when cleared — the era value simply goes unused
+    // once `added` is null (this block stops rendering the added pitcher)
+    if (!added) return;
+    let alive = true;
+    loadPitcherSeason(added.id).then(log => { if (alive) setEra(pitcherSeasonAverages(log).era); });
+    return () => { alive = false; };
+  }, [added]);
 
   const resolve = async () => {
     const q = query.trim();
@@ -2857,12 +2926,12 @@ function AddPitcherBlock({ oppName, oppTeamId, date }) {
 
   if (added) {
     return (
-      <div style={{ marginTop:10, paddingTop:10, borderTop:`1px solid ${C.rule}`, position:"relative" }}>
+      <div style={{ marginTop:10, paddingTop:10, borderTop:`1px solid ${C.darkBorder}`, position:"relative" }}>
         <button onClick={()=>setAdded(null)} title="Remove this pitcher"
           aria-label="Remove this pitcher"
           style={{ position:"absolute", top:8, right:0, border:"none", background:"transparent",
-            color:C.inkSoft, cursor:"pointer", fontFamily:MONO, fontSize:13, padding:4, lineHeight:1 }}>✕</button>
-        <PitcherBlock name={added.name} pid={added.id} vsName={oppName} oppTeamId={oppTeamId} date={date} bare />
+            color:C.darkTextSoft, cursor:"pointer", fontFamily:MONO, fontSize:13, padding:4, lineHeight:1 }}>✕</button>
+        <PitcherBlock name={added.name} pid={added.id} vsName={oppName} era={era} oppTeamId={oppTeamId} date={date} bare />
       </div>
     );
   }
@@ -2873,12 +2942,14 @@ function AddPitcherBlock({ oppName, oppTeamId, date }) {
         <div style={{ display:"flex", gap:6 }}>
           <input autoFocus value={query} onChange={e=>setQuery(e.target.value)}
             onKeyDown={e=>{ if(e.key==="Enter") resolve(); if(e.key==="Escape") setOpen(false); }}
-            placeholder="Bulk pitcher's name" style={{ ...inputStyle, flex:1, fontSize:13 }} />
-          <button onClick={resolve} disabled={busy} style={{ border:`1px solid ${C.ink}`,
-            background:busy?C.rule:C.ink, color:"#fff", borderRadius:2, fontFamily:MONO, fontSize:11,
+            placeholder="Bulk pitcher's name" style={{ ...inputStyle, flex:1, fontSize:13,
+              background:"#2A2E38", color:C.darkText, border:`1px solid ${C.darkOutline}` }} />
+          <button onClick={resolve} disabled={busy} style={{ border:`1px solid ${C.darkText}`,
+            background:busy?C.darkOutline:C.darkText, color:busy?C.darkTextSoft:"#14181F",
+            borderRadius:2, fontFamily:MONO, fontSize:11,
             padding:"6px 12px", cursor:busy?"default":"pointer" }}>{busy?"…":"Add"}</button>
-          <button onClick={()=>{ setOpen(false); setErr(""); }} style={{ border:`1px solid ${C.rule}`,
-            background:"#fff", color:C.ink, borderRadius:2, fontFamily:MONO, fontSize:11,
+          <button onClick={()=>{ setOpen(false); setErr(""); }} style={{ border:`1px solid ${C.darkOutline}`,
+            background:"transparent", color:C.darkTextSoft, borderRadius:2, fontFamily:MONO, fontSize:11,
             padding:"6px 10px", cursor:"pointer" }}>Cancel</button>
         </div>
         {err && <div style={{ marginTop:6, fontFamily:SANS, fontSize:12, color:C.under }}>{err}</div>}
@@ -2887,8 +2958,8 @@ function AddPitcherBlock({ oppName, oppTeamId, date }) {
   }
 
   return (
-    <button onClick={()=>setOpen(true)} style={{ marginTop:8, border:`1px dashed ${C.rule}`,
-      background:"transparent", color:C.inkSoft, borderRadius:3, fontFamily:MONO, fontSize:11,
+    <button onClick={()=>setOpen(true)} style={{ marginTop:8, border:`1px dashed ${C.darkOutline}`,
+      background:"transparent", color:C.darkTextSoft, borderRadius:3, fontFamily:MONO, fontSize:11,
       padding:"5px 10px", cursor:"pointer" }}>+ Add a pitcher to check</button>
   );
 }
@@ -2917,6 +2988,26 @@ function FitTitle({ text, maxSize = 18, minSize = 12, style }) {
     return () => ro.disconnect();
   }, [text, maxSize, minSize]);
   return <div ref={ref} style={{ whiteSpace:"nowrap", overflow:"hidden", fontSize, ...style }}>{text}</div>;
+}
+
+/* the modal's matchup title, split down the same midline the two team
+   columns below it share: away team name fixed to the box's left edge,
+   home team name fixed to the start of the right half, and "@" hugging the
+   midline from the left (end of the away side). */
+function MatchupTitle({ away, home }) {
+  const titleStyle = { fontFamily:SANS, fontWeight:800, letterSpacing:"-0.01em" };
+  return (
+    <div style={{ display:"flex", marginTop:4 }}>
+      <div style={{ flex:1, minWidth:0, display:"flex", alignItems:"baseline",
+        justifyContent:"space-between", gap:6 }}>
+        <FitTitle text={away} maxSize={18} minSize={11} style={{ ...titleStyle, minWidth:0, flex:"1 1 auto" }} />
+        <span style={{ ...titleStyle, fontSize:15, color:C.inkSoft, flexShrink:0 }}>@</span>
+      </div>
+      <div style={{ flex:1, minWidth:0, paddingLeft:6 }}>
+        <FitTitle text={home} maxSize={18} minSize={11} style={titleStyle} />
+      </div>
+    </div>
+  );
 }
 
 function GameModal({ m, tags, setTag, now, onClose }) {
@@ -3147,8 +3238,7 @@ function GameModal({ m, tags, setTag, now, onClose }) {
                 borderRadius:2, fontFamily:MONO, fontSize:13, padding:"4px 10px", cursor:"pointer" }}>✕</button>
             </div>
           </div>
-          <FitTitle text={`${g.awayName} @ ${g.homeName}`} maxSize={18} minSize={12}
-            style={{ fontFamily:SANS, fontWeight:800, letterSpacing:"-0.01em", marginTop:4 }} />
+          <MatchupTitle away={g.awayName} home={g.homeName} />
         </div>
 
         {/* tag editor */}
@@ -3222,8 +3312,38 @@ function GameModal({ m, tags, setTag, now, onClose }) {
           </div>
         )}
 
-        {/* ── H2H OVERVIEW (top) — tap to expand the past meetings ── */}
-        <div style={{ padding:"12px 18px", borderBottom:`1px solid ${C.rule}`, background:C.card }}>
+        {/* situational-trend indicators — full-width strip split into the
+            away team's 6 slots (left half) and home team's 6 (right half),
+            lined up with the columns below */}
+        {t && <TrendIndicatorRow t={t} awayId={g.awayId} homeId={g.homeId} />}
+
+        {/* ── lineups: away left, home right (stays side-by-side on mobile) ── */}
+        <div className="ts-lineups" style={{ gap:0 }}>
+          <TeamPanel teamName={g.awayName} oppName={g.homeName}
+            lineup={awayLU} pitcherName={g.awayPname} pitcherId={g.awayPid}
+            oppPitcherName={g.homePname} oppPitcherId={g.homePid}
+            oppTeamId={g.homeId} date={date} era={t ? t.pitcherEra(g.awayId) : null}
+            battingLine={t ? t.hitsLine(g.awayId) : null}
+            showBoxPitching={showBoxPitching} boxPitchers={boxPitching?.away} final={final}
+            onStat={(name,stat)=>setPick({ name, stat, ts:Date.now() })} />
+          <div style={{ borderLeft:`1px solid ${C.rule}` }} className="ts-h2h-divider">
+            <TeamPanel teamName={g.homeName} oppName={g.awayName}
+              lineup={homeLU} pitcherName={g.homePname} pitcherId={g.homePid}
+              oppPitcherName={g.awayPname} oppPitcherId={g.awayPid}
+              oppTeamId={g.awayId} date={date} era={t ? t.pitcherEra(g.homeId) : null}
+              battingLine={t ? t.hitsLine(g.homeId) : null}
+              showBoxPitching={showBoxPitching} boxPitchers={boxPitching?.home} final={final}
+              onStat={(name,stat)=>setPick({ name, stat, ts:Date.now() })} />
+          </div>
+        </div>
+
+        <div style={{ padding:"8px 18px", fontFamily:MONO, fontSize:9.5, color:C.ruleDark, lineHeight:1.6 }}>
+          Tap a hitter’s name for their career vs the opposing starter; tap any H · TB · HRR
+          last-5 line to open the prop analyzer for that stat.
+        </div>
+
+        {/* ── H2H OVERVIEW (bottom) — tap to expand the past meetings ── */}
+        <div style={{ padding:"12px 18px 16px", borderTop:`1px solid ${C.rule}`, background:C.card }}>
           <div onClick={()=> h2h && h2h.played>0 && setH2hOpen(v=>!v)}
             style={{ cursor: h2h && h2h.played>0 ? "pointer" : "default" }}>
             <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:8 }}>
@@ -3269,39 +3389,6 @@ function GameModal({ m, tags, setTag, now, onClose }) {
             </div>
           )}
         </div>
-
-        {/* batting trio + situational-trend indicators, one row per team —
-            trio on the left, this game's trends spelled out on the right in
-            the same fixed slot order/colors as the homepage schedule grid */}
-        {t && (
-          <div style={{ display:"flex", flexDirection:"column", gap:6, padding:"10px 18px 2px" }}>
-            <TrendRow tid={g.awayId} t={t} />
-            <TrendRow tid={g.homeId} t={t} />
-          </div>
-        )}
-
-        {/* ── lineups: away left, home right (stack on mobile) ── */}
-        <div className="ts-lineups" style={{ gap:0 }}>
-          <TeamPanel teamName={g.awayName} oppName={g.homeName}
-            lineup={awayLU} pitcherName={g.awayPname} pitcherId={g.awayPid}
-            oppPitcherName={g.homePname} oppPitcherId={g.homePid}
-            oppTeamId={g.homeId} date={date}
-            showBoxPitching={showBoxPitching} boxPitchers={boxPitching?.away} final={final}
-            onStat={(name,stat)=>setPick({ name, stat, ts:Date.now() })} />
-          <div style={{ borderLeft:`1px solid ${C.rule}` }} className="ts-h2h-divider">
-            <TeamPanel teamName={g.homeName} oppName={g.awayName}
-              lineup={homeLU} pitcherName={g.homePname} pitcherId={g.homePid}
-              oppPitcherName={g.awayPname} oppPitcherId={g.awayPid}
-              oppTeamId={g.awayId} date={date}
-              showBoxPitching={showBoxPitching} boxPitchers={boxPitching?.home} final={final}
-              onStat={(name,stat)=>setPick({ name, stat, ts:Date.now() })} />
-          </div>
-        </div>
-
-        <div style={{ padding:"8px 18px 16px", fontFamily:MONO, fontSize:9.5, color:C.ruleDark, lineHeight:1.6 }}>
-          Tap a hitter’s name for their career vs the opposing starter; tap any H · TB · HRR
-          last-5 line to open the prop analyzer for that stat.
-        </div>
       </div>
 
       {pick && <PropModal injected={pick} onClose={()=>setPick(null)} />}
@@ -3326,10 +3413,7 @@ html, body { margin:0; padding:0; background:${C.paper}; overscroll-behavior-y:n
   .ts-cal { grid-auto-flow:column; grid-auto-columns:89%; grid-template-columns:none;
             overflow-x:auto; scroll-snap-type:x mandatory; scroll-padding-left:0; }
   .ts-cal-col { min-width:0; scroll-snap-align:start; }
-  .ts-lineups { grid-template-columns:1fr; }
-  .ts-lineup-col { border-right:none !important; }
-  .ts-lineup-col + .ts-lineup-col { border-top:1px solid #CDD3DA; }
-  .ts-h2h-divider { border-left:none !important; border-top:1px solid #CDD3DA; }
+  /* away/home stay side-by-side on mobile too (no stacking override) */
   .ts-app { padding:calc(14px + env(safe-area-inset-top)) calc(6px + env(safe-area-inset-right))
     calc(36px + env(safe-area-inset-bottom)) calc(6px + env(safe-area-inset-left)); }
   .ts-nav-arrow { display:none !important; }
