@@ -2670,7 +2670,7 @@ function TeamPanel({ teamName, lineup, oppName, pitcherName, pitcherId, onStat, 
   // null = neither tab open, nothing shown yet — tapping a tab opens it,
   // tapping the already-open tab closes it again (accordion, not a toggle
   // between two always-visible views). Only the batting lineup collapses
-  // like this; the starting-pitcher/box-score pitching block below is
+  // like this; the starting-pitcher/box-score pitching block above it is
   // always shown regardless of `view`.
   const [view, setView] = useState(null);         // null | "last5" | "vssp"
   const [vsData, setVsData] = useState({});       // batterId -> stat | null
@@ -2709,13 +2709,44 @@ function TeamPanel({ teamName, lineup, oppName, pitcherName, pitcherId, onStat, 
           : lineup.source==="projected" ? <Tag>Projected</Tag> : <Tag>No lineup</Tag>}
       </div>
 
+      {/* starting pitcher (upcoming games) or the full game's pitching line
+          (live/finished games) — shown above the lineup */}
+      <div style={{ margin:"10px 10px 6px", padding:"10px 12px", borderRadius:3,
+        background:"#fff", border:`1px solid ${C.rule}` }}>
+        {showBoxPitching ? (
+          <>
+            <div style={{ fontFamily:MONO, fontSize:9, letterSpacing:"0.12em", textTransform:"uppercase",
+              color:C.ruleDark, marginBottom:6 }}>Pitching</div>
+            {!boxPitchers ? (
+              <div style={{ fontFamily:MONO, fontSize:12, color:C.inkSoft }}>Loading…</div>
+            ) : boxPitchers.length===0 ? (
+              <div style={{ fontFamily:SANS, fontSize:13, color:C.inkSoft }}>No pitching stats yet.</div>
+            ) : (
+              <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+                <PLineHeader />
+                {boxPitchers.map(p => <PitcherStatLine key={p.pid} p={p} final={final} />)}
+              </div>
+            )}
+          </>
+        ) : (
+          <>
+            <div style={{ fontFamily:MONO, fontSize:9, letterSpacing:"0.12em", textTransform:"uppercase",
+              color:C.ruleDark, marginBottom:4 }}>Starting pitcher</div>
+            <PitcherBlock name={pitcherName} pid={pitcherId} vsName={oppName} oppTeamId={oppTeamId} date={date} bare />
+            {/* the probable "starter" is sometimes just a 1-2 inning opener —
+                let the viewer look up the actual bulk pitcher alongside them */}
+            <AddPitcherBlock oppName={oppName} oppTeamId={oppTeamId} date={date} />
+          </>
+        )}
+      </div>
+
       {/* view toggle */}
       <div style={{ display:"flex", gap:3, padding:"6px 10px 2px", borderBottom:`1px solid #EEF0F2` }}>
         {tabBtn("vssp", canVs ? `vs ${oppPitcherName.split(" ").slice(-1)[0]}` : "vs SP", canVs)}
         {tabBtn("last5","Last 5")}
       </div>
 
-      <div style={{ padding:"4px 0" }}>
+      <div style={{ padding:"4px 0 12px" }}>
         {/* nothing renders here until a tab is tapped open */}
         {view && (view==="last5" ? (
           <div style={{ display:"grid", gridTemplateColumns:ROW_COLS, gap:6, padding:"2px 10px",
@@ -2790,37 +2821,6 @@ function TeamPanel({ teamName, lineup, oppName, pitcherName, pitcherId, onStat, 
         {view==="vssp" && !canVs && (
           <div style={{ padding:"8px 12px", fontFamily:SANS, fontSize:12, color:C.inkSoft }}>
             No probable starter posted for {oppName} yet.</div>)}
-      </div>
-
-      {/* starting pitcher (upcoming games) or the full game's pitching line
-          (live/finished games) — visually separated from the hitters */}
-      <div style={{ margin:"6px 10px 12px", padding:"10px 12px", borderRadius:3,
-        background:"#fff", border:`1px solid ${C.rule}` }}>
-        {showBoxPitching ? (
-          <>
-            <div style={{ fontFamily:MONO, fontSize:9, letterSpacing:"0.12em", textTransform:"uppercase",
-              color:C.ruleDark, marginBottom:6 }}>Pitching</div>
-            {!boxPitchers ? (
-              <div style={{ fontFamily:MONO, fontSize:12, color:C.inkSoft }}>Loading…</div>
-            ) : boxPitchers.length===0 ? (
-              <div style={{ fontFamily:SANS, fontSize:13, color:C.inkSoft }}>No pitching stats yet.</div>
-            ) : (
-              <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
-                <PLineHeader />
-                {boxPitchers.map(p => <PitcherStatLine key={p.pid} p={p} final={final} />)}
-              </div>
-            )}
-          </>
-        ) : (
-          <>
-            <div style={{ fontFamily:MONO, fontSize:9, letterSpacing:"0.12em", textTransform:"uppercase",
-              color:C.ruleDark, marginBottom:4 }}>Starting pitcher</div>
-            <PitcherBlock name={pitcherName} pid={pitcherId} vsName={oppName} oppTeamId={oppTeamId} date={date} bare />
-            {/* the probable "starter" is sometimes just a 1-2 inning opener —
-                let the viewer look up the actual bulk pitcher alongside them */}
-            <AddPitcherBlock oppName={oppName} oppTeamId={oppTeamId} date={date} />
-          </>
-        )}
       </div>
     </div>
   );
