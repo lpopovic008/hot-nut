@@ -163,8 +163,8 @@ function pitcherSeasonAverages(splits) {
 // season pace (or fixed fallback thresholds if no season data exists yet).
 // Shared by PLine's rendering and the pitcher-rematch trend indicator, which
 // counts how many of these came back green vs red for a thumbs up/down.
-function pitcherLineColors(st, season) {
-  const col = (good, bad) => good ? C.over : bad ? C.under : C.ink;
+function pitcherLineColors(st, season, dark) {
+  const col = (good, bad) => good ? C.over : bad ? C.under : (dark ? C.darkText : C.ink);
   const outs = ipToOuts(st.inningsPitched);
   const h = Number(st.hits)||0, er = Number(st.earnedRuns)||0;
   const bb = Number(st.baseOnBalls)||0, k = Number(st.strikeOuts)||0;
@@ -557,11 +557,24 @@ const ErrBox = ({ children }) => (
   <div style={{ padding:"12px 14px", background:"#FCEBED", border:`1px solid ${C.under}`,
     borderRadius:2, color:C.under, fontFamily:SANS, fontSize:13, marginBottom:16 }}>{children}</div>
 );
-const Tag = ({ children, tone }) => (
-  <span style={{ fontFamily:MONO, fontSize:10, letterSpacing:"0.06em", textTransform:"uppercase",
-    padding:"1px 6px", borderRadius:2, border:`1px solid ${tone==="ok"?C.over:C.ruleDark}`,
-    color: tone==="ok"?C.over:C.inkSoft }}>{children}</span>
-);
+// solid green check = confirmed; outline clock = still pending/projected.
+// `color` sets the pending state's stroke so it reads on either a light or
+// dark background — the confirmed state's green+white always reads on both.
+function ConfirmBadge({ confirmed, color = C.ruleDark, size = 13, title }) {
+  return confirmed ? (
+    <svg width={size} height={size} viewBox="0 0 24 24" title={title} style={{ flexShrink:0 }}>
+      <circle cx="12" cy="12" r="11" fill={C.over} />
+      <path d="M7 12.3l3.3 3.3L17 9" stroke="#fff" strokeWidth="2.3" fill="none"
+        strokeLinecap="round" strokeLinejoin="round"/>
+    </svg>
+  ) : (
+    <svg width={size} height={size} viewBox="0 0 24 24" title={title} style={{ flexShrink:0 }}>
+      <circle cx="12" cy="12" r="10" stroke={color} strokeWidth="1.6" fill="none"/>
+      <path d="M12 7.5v5l3.2 2" stroke={color} strokeWidth="1.6" fill="none"
+        strokeLinecap="round" strokeLinejoin="round"/>
+    </svg>
+  );
+}
 
 const ROW_COLS = "14px minmax(36px,1fr) 30px 60px 9px 60px 9px 60px";
 const SEP = <span style={{ textAlign:"center", fontFamily:MONO, fontSize:12,
@@ -1469,18 +1482,21 @@ const CARD_H = 58;
 /* fixed situational-trend slots, rendered as a 1x5 row per team (away row on
    top, home row on bottom — matching the Game/Pitcher-Batter sections). add
    new trends here and every card + the legend adjust automatically. */
+// `shortLabel` is what actually renders inside a modal TrendChip — narrow
+// enough to fit without truncating. `label` stays the full name, still used
+// by the homepage legend and calendar-card tooltips, which have room for it.
 const TREND_SLOTS = [
-  { key:"bigday", color:C.bigday, label:"Big Day",
+  { key:"bigday", color:C.bigday, label:"Big Day", shortLabel:"Big Day",
     desc:"Scored 10+ runs in their last game" },
-  { key:"late",   color:C.late,   label:"Late go-ahead",
+  { key:"late",   color:C.late,   label:"Late go-ahead", shortLabel:"Late GA",
     desc:"Team never led until the 8th inning or later yesterday" },
-  { key:"gauntlet", color:C.gauntlet, label:"The Gauntlet",
+  { key:"gauntlet", color:C.gauntlet, label:"The Gauntlet", shortLabel:"Gauntlet",
     desc:"Just faced 2-3 straight starters with a sub-3.00 ERA" },
-  { key:"formerTeam", color:C.revenge, label:"Revenge game",
+  { key:"formerTeam", color:C.revenge, label:"Revenge game", shortLabel:"Revenge",
     desc:"Probable pitcher spent 2+ seasons on the team he's facing today" },
-  { key:"echo",   color:C.echo,   label:"Streak echo",
+  { key:"echo",   color:C.echo,   label:"Streak echo", shortLabel:"Streak",
     desc:"Team just snapped a 10+ game win or loss streak yesterday" },
-  { key:"travel", color:C.travel, label:"B2B travel",
+  { key:"travel", color:C.travel, label:"B2B travel", shortLabel:"B2B",
     desc:"West yesterday, East today on back-to-back days" },
 ];
 // total rendered width of the trend-box strip — a fixed constant (the slot
@@ -1595,14 +1611,17 @@ function TrendBox({ present, color, title, inner, dark }) {
    span exactly its half of the indicator row, on any viewport. */
 function TrendChip({ slot, present }) {
   return (
+    // a fixed lineHeight, and a real (if color-matched/invisible) border in
+    // both states, so an unlit chip takes up exactly the same box as a lit
+    // one instead of collapsing down to just its padding.
     <span title={slot.desc} style={{ flex:1, minWidth:0, boxSizing:"border-box",
-      fontFamily:MONO, fontSize:8, fontWeight:700, textAlign:"center",
+      fontFamily:MONO, fontSize:8, fontWeight:700, textAlign:"center", lineHeight:"12px",
       whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis",
       padding:"3px 2px", borderRadius:3,
       background: present ? slot.color : "transparent",
       color: present ? "#fff" : C.ruleDark,
-      border: present ? "none" : `1px solid ${C.rule}` }}>
-      {present ? slot.label : ""}
+      border: `1px solid ${present ? slot.color : C.rule}` }}>
+      {present ? slot.shortLabel : " "}
     </span>
   );
 }
@@ -1909,33 +1928,39 @@ const PLINE_EXTRA_COLS = "repeat(3, minmax(0,1fr))";
 // rows. Continues from the header so the banding reads as one continuous
 // column, not something that starts partway down.
 const PLINE_COL_BG = [C.card, "transparent", C.card, "transparent", C.card, "transparent", C.card, "transparent"];
+// same alternating idea, tuned for the dark pitcher box (a faint white wash
+// instead of the light card tint)
+const PLINE_COL_BG_DARK = ["rgba(255,255,255,0.05)", "transparent", "rgba(255,255,255,0.05)", "transparent",
+  "rgba(255,255,255,0.05)", "transparent", "rgba(255,255,255,0.05)", "transparent"];
 // Date and Opp (outside PLine's own grid, in PitcherSeasonModal) share this
 // one flat tint — a distinct group from the alternating stat columns, not
 // another entry in that alternation.
 const PLINE_META_BG = "#EEF0F3";
 // column labels for a PLine row, meant to be rendered ONCE above a list of
 // PLine rows (values alone are ambiguous without a header in view).
-function PLineHeader({ extra, leftBorder }) {
+function PLineHeader({ extra, leftBorder, dark }) {
+  const colBg = dark ? PLINE_COL_BG_DARK : PLINE_COL_BG;
+  const ruleColor = dark ? C.darkBorder : C.rule;
   return (
     <div style={{ display:"grid", gridTemplateColumns: extra ? `${PLINE_COLS} ${PLINE_EXTRA_COLS}` : PLINE_COLS,
       width:"100%", fontFamily:MONO, fontSize:9, letterSpacing:"0.06em",
-      textTransform:"uppercase", color:C.ruleDark, textAlign:"center" }}>
+      textTransform:"uppercase", color: dark?C.darkTextSoft:C.ruleDark, textAlign:"center" }}>
       {["IP","H","ER","BB","K"].map((l,i)=>(
         <span key={l} style={{ paddingTop:4, paddingBottom:4,
-          background: PLINE_COL_BG[i], borderLeft: (i>0 || leftBorder) ? `1px solid ${C.rule}` : "none",
+          background: colBg[i], borderLeft: (i>0 || leftBorder) ? `1px solid ${ruleColor}` : "none",
           whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{l}</span>
       ))}
       {extra && [["PIT","Pitcher score vs this start's lineup"],
                   ["OPP","Opponent's own batting score in their game right before this start"],
                   ["HIT","Opponent's hits in their game right before this start"]].map(([l,tip],j)=>(
         <span key={l} title={tip} style={{ paddingTop:4, paddingBottom:4,
-          background: PLINE_COL_BG[5+j], borderLeft:`1px solid ${C.rule}`,
+          background: colBg[5+j], borderLeft:`1px solid ${ruleColor}`,
           whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{l}</span>
       ))}
     </div>
   );
 }
-function PLine({ s, season, extra, maxSize = 13, minSize = 7.5, leftBorder }) {
+function PLine({ s, season, extra, maxSize = 13, minSize = 7.5, leftBorder, dark }) {
   const ref = useRef(null);
   const [fontSize, setFontSize] = useState(maxSize);
   useLayoutEffect(() => {
@@ -1965,9 +1990,10 @@ function PLine({ s, season, extra, maxSize = 13, minSize = 7.5, leftBorder }) {
   // instead of running it through pitcherLineColors (which would read its
   // all-zero/undefined fields as real, unusually good numbers).
   const played = st.inningsPitched != null;
+  const neutralCol = dark ? C.darkTextSoft : C.ruleDark;
   const { ipCol, hCol, erCol, bbCol, kCol } = played
-    ? pitcherLineColors(st, season)
-    : { ipCol:C.ruleDark, hCol:C.ruleDark, erCol:C.ruleDark, bbCol:C.ruleDark, kCol:C.ruleDark };
+    ? pitcherLineColors(st, season, dark)
+    : { ipCol:neutralCol, hCol:neutralCol, erCol:neutralCol, bbCol:neutralCol, kCol:neutralCol };
   const v = (x) => x==null ? "–" : x;
 
   // bg left undefined means "use this column's own alternating tint"
@@ -2003,10 +2029,10 @@ function PLine({ s, season, extra, maxSize = 13, minSize = 7.5, leftBorder }) {
       gridTemplateColumns: extra ? `${PLINE_COLS} ${PLINE_EXTRA_COLS}` : PLINE_COLS,
       width:"100%", fontSize, textAlign:"center" }}>
       {cells.map(([txt,c,bg],i)=>{
-        const background = bg ?? PLINE_COL_BG[i];
+        const background = bg ?? (dark ? PLINE_COL_BG_DARK[i] : PLINE_COL_BG[i]);
         return (
         <span key={i} style={{ display:"block", color:c, whiteSpace:"nowrap", overflow:"hidden",
-          background, borderLeft: (i>0 || leftBorder) ? `1px solid ${C.rule}` : "none",
+          background, borderLeft: (i>0 || leftBorder) ? `1px solid ${dark?C.darkBorder:C.rule}` : "none",
           paddingTop:5, paddingBottom:5, marginTop:-5, marginBottom:-5 }}>{txt}</span>
         );
       })}
@@ -2206,10 +2232,14 @@ function PitcherBlock({ name, pid, vsName, era, oppTeamId, date, bare }) {
           <span style={{ fontFamily:MONO, fontSize:11, color:C.darkTextSoft, fontWeight:400 }}>
             {"  vs "}{vsName}</span>
         </div>
-        {name && (
-          <span style={{ fontFamily:MONO, fontSize:15, fontWeight:700, color:C.darkText, flexShrink:0 }}>
-            {era!=null ? era.toFixed(2) : "–"}</span>
-        )}
+        <span style={{ display:"flex", alignItems:"center", gap:6, flexShrink:0 }}>
+          <ConfirmBadge confirmed={!!name} color={C.darkTextSoft}
+            title={name ? "Probable starter confirmed" : "Probable starter not yet announced"} />
+          {name && (
+            <span style={{ fontFamily:MONO, fontSize:15, fontWeight:700, color:C.darkText }}>
+              {era!=null ? era.toFixed(2) : "–"}</span>
+          )}
+        </span>
       </div>
       {!name && (
         <div style={{ fontFamily:SANS, fontSize:13, color:C.darkTextSoft, marginTop:4 }}>
@@ -2237,22 +2267,22 @@ function PitcherStatLine({ p, final }) {
     <div>
       <div style={{ display:"flex", alignItems:"baseline", gap:6, minWidth:0 }}>
         <button onClick={()=>setShowLog(true)} title={`${p.name} — ${SEASON} game log`}
-          style={{ font:"inherit", fontFamily:SANS, fontSize:13, fontWeight:700, color:C.blue,
+          style={{ font:"inherit", fontFamily:SANS, fontSize:13, fontWeight:700, color:C.darkText,
             cursor:"pointer", border:"none", background:"transparent", padding:0,
-            textDecoration:"underline", textDecorationColor:C.blue, textUnderlineOffset:2,
+            textDecoration:"underline", textDecorationColor:C.darkText, textUnderlineOffset:2,
             textAlign:"left", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis",
             minWidth:0, flexShrink:1 }}>{p.name}</button>
         {/* season ERA, box-score style — only once the game (and so this
             line) is actually final, not while still live. Pinned to the
             right edge of the pitching box, in line with the name. */}
         {final && season?.era!=null && (
-          <span style={{ fontFamily:MONO, fontSize:11, color:C.inkSoft, flexShrink:0, marginLeft:"auto" }}>
+          <span style={{ fontFamily:MONO, fontSize:11, color:C.darkTextSoft, flexShrink:0, marginLeft:"auto" }}>
             {season.era.toFixed(2)} ERA
           </span>
         )}
       </div>
       <div style={{ marginTop:2 }}>
-        <PLine s={{ stat:p.stat }} season={season} maxSize={13} />
+        <PLine s={{ stat:p.stat }} season={season} maxSize={13} dark />
       </div>
       {showLog && <PitcherSeasonModal pid={p.pid} name={p.name} onClose={()=>setShowLog(false)} />}
     </div>
@@ -2682,7 +2712,7 @@ async function loadBatterVs(batterId, pitcherId) {
 
 /* one team's column: lineup of 9 hitters, then its starting pitcher block below */
 const HV_COLS = "14px minmax(40px,1fr) 34px 34px 30px 48px";   // # name AB H HR AVG
-function TeamPanel({ teamName, lineup, oppName, pitcherName, pitcherId, era, battingLine, onStat, oppPitcherName, oppPitcherId, oppTeamId, date, showBoxPitching, boxPitchers, final }) {
+function TeamPanel({ lineup, oppName, pitcherName, pitcherId, era, battingLine, onStat, oppPitcherName, oppPitcherId, oppTeamId, date, showBoxPitching, boxPitchers, final }) {
   const canVs = !!oppPitcherId && !!oppPitcherName;
   // the manually-added "bulk pitcher" (see AddPitcherBlock) is controlled
   // here, not inside that component, so it can also unlock its own
@@ -2752,32 +2782,20 @@ function TeamPanel({ teamName, lineup, oppName, pitcherName, pitcherId, era, bat
 
   return (
     <div className="ts-lineup-col" style={{ minWidth:0 }}>
-      <div style={{ padding:"8px 12px", borderBottom:`1px solid ${C.rule}`,
-        display:"flex", justifyContent:"space-between", alignItems:"center", gap:8 }}>
-        <span style={{ fontFamily:SANS, fontWeight:700, fontSize:14 }}>{teamName}</span>
-        {!lineup ? <Tag>…</Tag>
-          : lineup.source==="confirmed" ? <Tag tone="ok">Confirmed</Tag>
-          : lineup.source==="projected" ? <Tag>Projected</Tag> : <Tag>No lineup</Tag>}
-      </div>
-
       {/* starting pitcher (upcoming games) or the full game's pitching line
-          (live/finished games) — shown above the lineup. Dark, matching the
-          calendar's own dark card shade, for the pre-game view; the
-          box-score view keeps its light background. */}
+          (live/finished games) — shown above the lineup. Always dark,
+          matching the calendar's own dark card shade, in both states. */}
       <div style={{ margin:"10px 10px 6px", padding:"10px 12px", borderRadius:3,
-        background: showBoxPitching ? "#fff" : "#20232A",
-        border:`1px solid ${showBoxPitching ? C.rule : C.darkBorder}` }}>
+        background:"#20232A", border:`1px solid ${C.darkBorder}` }}>
         {showBoxPitching ? (
           <>
-            <div style={{ fontFamily:MONO, fontSize:9, letterSpacing:"0.12em", textTransform:"uppercase",
-              color:C.ruleDark, marginBottom:6 }}>Pitching</div>
             {!boxPitchers ? (
-              <div style={{ fontFamily:MONO, fontSize:12, color:C.inkSoft }}>Loading…</div>
+              <div style={{ fontFamily:MONO, fontSize:12, color:C.darkTextSoft }}>Loading…</div>
             ) : boxPitchers.length===0 ? (
-              <div style={{ fontFamily:SANS, fontSize:13, color:C.inkSoft }}>No pitching stats yet.</div>
+              <div style={{ fontFamily:SANS, fontSize:13, color:C.darkTextSoft }}>No pitching stats yet.</div>
             ) : (
               <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
-                <PLineHeader />
+                <PLineHeader dark />
                 {boxPitchers.map(p => <PitcherStatLine key={p.pid} p={p} final={final} />)}
               </div>
             )}
@@ -2796,8 +2814,12 @@ function TeamPanel({ teamName, lineup, oppName, pitcherName, pitcherId, era, bat
       {/* last 5 games' batting score + actual hits, above the lineup */}
       {battingLine && <div style={{ margin:"0 10px 8px" }}><BattingFive games={battingLine} /></div>}
 
-      {/* view toggle */}
-      <div style={{ display:"flex", gap:3, padding:"6px 10px 2px", borderBottom:`1px solid #EEF0F2` }}>
+      {/* view toggle — a confirmed/pending badge for the batting lineup
+          sits before the tabs themselves */}
+      <div style={{ display:"flex", alignItems:"center", gap:3, padding:"6px 10px 2px", borderBottom:`1px solid #EEF0F2` }}>
+        <ConfirmBadge confirmed={lineup?.source==="confirmed"}
+          title={!lineup ? "Lineup loading…" : lineup.source==="confirmed" ? "Batting lineup confirmed"
+            : lineup.source==="projected" ? "Batting lineup projected" : "No lineup yet"} />
         {tabBtn("vssp", canVs ? `vs ${oppPitcherName.split(" ").slice(-1)[0]}` : "vs SP", canVs)}
         {addedPitcher && tabBtn("vsadded", `vs ${addedPitcher.name.split(" ").slice(-1)[0]}`)}
         {tabBtn("last5","Last 5")}
@@ -3319,7 +3341,7 @@ function GameModal({ m, tags, setTag, now, onClose }) {
 
         {/* ── lineups: away left, home right (stays side-by-side on mobile) ── */}
         <div className="ts-lineups" style={{ gap:0 }}>
-          <TeamPanel teamName={g.awayName} oppName={g.homeName}
+          <TeamPanel oppName={g.homeName}
             lineup={awayLU} pitcherName={g.awayPname} pitcherId={g.awayPid}
             oppPitcherName={g.homePname} oppPitcherId={g.homePid}
             oppTeamId={g.homeId} date={date} era={t ? t.pitcherEra(g.awayId) : null}
@@ -3327,7 +3349,7 @@ function GameModal({ m, tags, setTag, now, onClose }) {
             showBoxPitching={showBoxPitching} boxPitchers={boxPitching?.away} final={final}
             onStat={(name,stat)=>setPick({ name, stat, ts:Date.now() })} />
           <div style={{ borderLeft:`1px solid ${C.rule}` }} className="ts-h2h-divider">
-            <TeamPanel teamName={g.homeName} oppName={g.awayName}
+            <TeamPanel oppName={g.awayName}
               lineup={homeLU} pitcherName={g.homePname} pitcherId={g.homePid}
               oppPitcherName={g.awayPname} oppPitcherId={g.awayPid}
               oppTeamId={g.awayId} date={date} era={t ? t.pitcherEra(g.homeId) : null}
@@ -3335,11 +3357,6 @@ function GameModal({ m, tags, setTag, now, onClose }) {
               showBoxPitching={showBoxPitching} boxPitchers={boxPitching?.home} final={final}
               onStat={(name,stat)=>setPick({ name, stat, ts:Date.now() })} />
           </div>
-        </div>
-
-        <div style={{ padding:"8px 18px", fontFamily:MONO, fontSize:9.5, color:C.ruleDark, lineHeight:1.6 }}>
-          Tap a hitter’s name for their career vs the opposing starter; tap any H · TB · HRR
-          last-5 line to open the prop analyzer for that stat.
         </div>
 
         {/* ── H2H OVERVIEW (bottom) — tap to expand the past meetings ── */}
