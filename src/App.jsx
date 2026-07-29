@@ -646,6 +646,10 @@ function TravelTrends({ tags, setTag, onReady }) {
   // last loaded for, so a manual refresh can skip straight past it and just
   // re-pull live scores/state instead of redoing all of that work every click.
   const indicatorsLoadedForRef = useRef(null);
+  // team ids whose batting line (last-5 quality-adjusted score + hits) has
+  // already been fetched or is in flight, via ensureBattingLine — reset
+  // alongside the other indicator state whenever the visible window moves.
+  const battingLineFetchedRef = useRef(new Set());
 
   const load = useCallback(async () => {
     const needIndicators = indicatorsLoadedForRef.current !== start;
@@ -653,7 +657,7 @@ function TravelTrends({ tags, setTag, onReady }) {
     // cleared here) so a manual refresh doesn't unmount the scroll
     // container and reset which day is in view
     setErr("");
-    if (needIndicators) { setEchoes(null); setComebacks(null); setFaced({}); setFormerTeams({}); setRunsMap({}); setHitsMap({}); setBattingScoreMap({}); setScheduleMap({}); }
+    if (needIndicators) { setEchoes(null); setComebacks(null); setFaced({}); setFormerTeams({}); setRunsMap({}); setHitsMap({}); setBattingScoreMap({}); setScheduleMap({}); battingLineFetchedRef.current = new Set(); }
     setBusy(true);
     try {
       /* ── window schedule (travel + next-game lookup + probable pitchers) ──
@@ -694,8 +698,8 @@ function TravelTrends({ tags, setTag, onReady }) {
             (byTeamDate[tid] = byTeamDate[tid]||{})[d.date] = venueTz; });
           // gamePk (not just date) identifies the exact game — a doubleheader
           // puts two of these in a row for the same team on the same date
-          if (hp?.id) (scheduleByTeam[away.id] = scheduleByTeam[away.id]||[]).push({ date:d.date, time:g.gameDate, gamePk:g.gamePk, oppPid:hp.id, isFinal });
-          if (ap?.id) (scheduleByTeam[home.id] = scheduleByTeam[home.id]||[]).push({ date:d.date, time:g.gameDate, gamePk:g.gamePk, oppPid:ap.id, isFinal });
+          if (hp?.id) (scheduleByTeam[away.id] = scheduleByTeam[away.id]||[]).push({ date:d.date, time:g.gameDate, gamePk:g.gamePk, oppPid:hp.id, isFinal, side:"away" });
+          if (ap?.id) (scheduleByTeam[home.id] = scheduleByTeam[home.id]||[]).push({ date:d.date, time:g.gameDate, gamePk:g.gamePk, oppPid:ap.id, isFinal, side:"home" });
         });
       });
       Object.values(scheduleByTeam).forEach(list=>list.sort((a,b)=>a.time.localeCompare(b.time)));
@@ -884,9 +888,9 @@ function TravelTrends({ tags, setTag, onReady }) {
       Object.entries(gamePkByDate).forEach(([tid, games])=>{
         const list = scheduleByTeam[tid] = scheduleByTeam[tid] || [];
         const known = new Set(list.map(s=>s.gamePk));
-        Object.entries(games).forEach(([time, { gamePk }])=>{
+        Object.entries(games).forEach(([time, { gamePk, side }])=>{
           // every entry here comes from the completed-games (`finals`) list
-          if (!known.has(gamePk)) list.push({ date:time.slice(0,10), time, gamePk, oppPid:null, isFinal:true });
+          if (!known.has(gamePk)) list.push({ date:time.slice(0,10), time, gamePk, oppPid:null, isFinal:true, side });
         });
       });
       Object.values(scheduleByTeam).forEach(list=>list.sort((a,b)=>a.time.localeCompare(b.time)));
@@ -1014,66 +1018,49 @@ function TravelTrends({ tags, setTag, onReady }) {
       // fetch below (the BAT trio's data source) even starts
       setFaced(facedMap);
       setFormerTeams(formerTeamMap);
-      /* ── quality-adjusted batting score: for every team shown, how well did
-         they hit (times on base + total bases — an OPS-flavored view, not
-         just raw hits) in each of their last 3 games relative to the
-         quality of every pitcher they actually faced that game (not just
-         the starter)? 0-10, 5.0 = exactly what that pitching staff's own
-         season rate stats (not just their ERA) would predict. Only fetches
-         box scores for the specific past games that feed a "last 3" trio
-         somewhere in the visible window, deduped by gamePk so a shared
-         game (e.g. yesterday's, feeding two different
-         cells) is only fetched once.
+      // the quality-adjusted batting score (the BAT number shown in a
+      // game's modal) is NOT fetched here — it needs a further box-score
+      // fetch per game plus a pitcher season-rate fetch per pitcher
+      // involved, which is real cost worth paying only for a game the
+      // viewer actually opens. See ensureBattingLine, called from
+      // GameModal itself once a game is open.
+      indicatorsLoadedForRef.current = start;
+    } catch (e) {
+      setErr(isNet(e.message) ? "Couldn't reach the MLB schedule service." : e.message);
+    } finally { setBusy(false); }
+  }, [start, westThreshold, minStreak]);
+  useEffect(() => { load(); }, [load]);   // auto-load on open and when min streak changes
 
-         Only each team's next still-to-be-played game gets this — as
-         games finish during the day, the "next game" for those two teams
-         shifts forward (to a later doubleheader game today, or to
-         tomorrow's game) and picks up the trio there instead.
-         Already-played/in-progress games are unaffected. Goes by each
-         game's own tracked isFinal/isLive status, not a wall-clock
-         comparison — a doubleheader's already-final early leg doesn't get
-         mistaken for still being "next up" ahead of its own late leg. ── */
-      const nextUpGamePk = {};   // teamId -> gamePk of its earliest not-yet-final game in this window
-      Object.values(dayGames).flat().forEach(g=>{
-        if (g.isFinal || g.isLive) return;
-        [g.awayId, g.homeId].forEach(tid=>{
-          if (nextUpGamePk[tid]==null || g.time < nextUpGamePk[tid].time)
-            nextUpGamePk[tid] = { gamePk:g.gamePk, time:g.time };
-        });
+  // lazily fills in battingScoreMap for just the given team ids' last 5
+  // games — called from GameModal once a game is actually opened (see
+  // its own effect), not from the eager load() above. Skips a team
+  // already fetched (or in flight) this window. Mirrors the same
+  // quality-adjusted-batting-score math the calendar used to compute for
+  // every team up front; now it's paid for only on demand.
+  const ensureBattingLine = useCallback(async (teamIds, beforeTime) => {
+    const need = (teamIds||[]).filter(tid => tid!=null && !battingLineFetchedRef.current.has(tid));
+    if (!need.length) return;
+    need.forEach(tid => battingLineFetchedRef.current.add(tid));
+    try {
+      const perTeamGames = {};   // tid -> last 5 prior finals, each {gamePk, time, side}
+      const gamePkSet = new Set();
+      need.forEach(tid => {
+        const sched = (scheduleMap[tid]||[])
+          .filter(s => s.isFinal && s.side && s.time < beforeTime)
+          .sort((a,b) => b.time.localeCompare(a.time))
+          .slice(0, 5);
+        perTeamGames[tid] = sched;
+        sched.forEach(s => gamePkSet.add(s.gamePk));
       });
-      const needsBatTrio = (tid, g) =>
-        g.isFinal || g.isLive || nextUpGamePk[tid]?.gamePk === g.gamePk;
-      const neededGamePks = new Set();
-      DATES.forEach(date=>{
-        (dayGames[date]||[]).forEach(g=>{
-          // compares against this exact game's own start time, not just its
-          // calendar date — on a doubleheader, the earlier game is a valid
-          // "previous game" for the later one despite sharing a date
-          [g.awayId, g.homeId].forEach(tid=>{
-            if (!needsBatTrio(tid, g)) return;
-            const m = gamePkByDate[tid];
-            if (!m) return;
-            Object.keys(m).filter(t=>t<g.time).sort().reverse().slice(0,3)
-              .forEach(t=>neededGamePks.add(m[t].gamePk));
-          });
-        });
-      });
+      if (!gamePkSet.size) return;
       const boxCache = {};   // gamePk -> { away:[{pid,name,stat}], home:[...] }
-      await mapPool([...neededGamePks], 4, async (gamePk) => {
+      await mapPool([...gamePkSet], 4, async (gamePk) => {
         const bx = await loadBoxscorePitchers(gamePk);
         if (bx) boxCache[gamePk] = bx;
       });
-      // every pitcher who appeared in any of those box scores (either side —
-      // a single historical game can feed both participating teams' own
-      // trios if both are shown somewhere in the window) needs their own
-      // season rate stats to judge the quality of the batting performance
-      // against them — not just their ERA, which different pitchers can
-      // reach through very different walk/home-run mixes (a control pitcher
-      // and a bat-misser can post the same ERA while allowing very
-      // different amounts of "on base for free" and "hit for power").
       const pitcherSeasonCache = {};   // pid -> { h9, bb9, hr9, doubles9, triples9 }
       const boxPids = new Set();
-      Object.values(boxCache).forEach(bx=>{
+      Object.values(boxCache).forEach(bx => {
         (bx.away||[]).forEach(p=>boxPids.add(p.pid));
         (bx.home||[]).forEach(p=>boxPids.add(p.pid));
       });
@@ -1094,9 +1081,9 @@ function TravelTrends({ tags, setTag, onReady }) {
           };
         } catch { /* fall back to league-average below */ }
       });
-      const battingScoreByDate = {};   // teamId -> { gameTime -> score(0-10) }
-      Object.entries(gamePkByDate).forEach(([tid, games])=>{
-        Object.entries(games).forEach(([gt, { gamePk, side }])=>{
+      const newScores = {};   // tid -> { time -> score }
+      need.forEach(tid => {
+        perTeamGames[tid].forEach(({ gamePk, time, side }) => {
           const bx = boxCache[gamePk];
           const pitchers = bx?.[side==="home"?"away":"home"];
           if (!pitchers || !pitchers.length) return;
@@ -1108,19 +1095,20 @@ function TravelTrends({ tags, setTag, onReady }) {
             expected += combinedProduction9(pitcherSeasonCache[p.pid] || LEAGUE_AVG_RATES) / 9 * trueIP;
           });
           const score = qualityScore(actual, expected);
-          if (score!=null) (battingScoreByDate[tid] = battingScoreByDate[tid]||{})[gt] = score;
+          if (score!=null) (newScores[tid] = newScores[tid]||{})[time] = score;
         });
       });
-
-      // the BAT trio is the last piece to resolve (its own box-score fetch
-      // pipeline runs after everything above) — see it appear last
-      setBattingScoreMap(battingScoreByDate);
-      indicatorsLoadedForRef.current = start;
-    } catch (e) {
-      setErr(isNet(e.message) ? "Couldn't reach the MLB schedule service." : e.message);
-    } finally { setBusy(false); }
-  }, [start, westThreshold, minStreak]);
-  useEffect(() => { load(); }, [load]);   // auto-load on open and when min streak changes
+      setBattingScoreMap(prev => {
+        const next = { ...prev };
+        Object.entries(newScores).forEach(([tid, byTime]) => { next[tid] = { ...next[tid], ...byTime }; });
+        return next;
+      });
+    } catch {
+      // a failed lazy fetch just leaves those teams' batting line blank —
+      // let the viewer retry by reopening the modal, rather than looping
+      need.forEach(tid => battingLineFetchedRef.current.delete(tid));
+    }
+  }, [scheduleMap]);
 
   // on mobile, scroll the calendar so today's column is in view on first load
   const calRef = useRef(null);
@@ -1431,8 +1419,7 @@ function TravelTrends({ tags, setTag, onReady }) {
                             const t = dayTrends[di];   // reuse; already computed above
                             cells.push(<CalCard key={i} g={g} t={t} tag={tagText(tags[g.gamePk])}
                               showInd={showIndicators} now={now}
-                              onOpen={()=>setModal({ date:d.date, games:dayGames, trends:dayTrends,
-                                idx:di })}/>);
+                              onOpen={()=>setModal({ date:d.date, idx:di })}/>);
                           }
                         });
                         if(lineIdx>=d.games.length) cells.push(<NowLine key="nl-end"/>);
@@ -1448,7 +1435,18 @@ function TravelTrends({ tags, setTag, onReady }) {
         </div>
       )}
 
-      {modal && <GameModal m={modal} tags={tags} setTag={setTag} now={now} onClose={()=>setModal(null)} />}
+      {modal && (() => {
+        // recomputed fresh on every render (not a frozen snapshot from
+        // click-time) so state updates that land after the modal is
+        // already open — like ensureBattingLine's lazy fetch resolving —
+        // actually reach it.
+        const openDay = days?.find(d => d.date===modal.date);
+        const openGames = (openDay?.games||[]).filter(Boolean);
+        const openTrends = openGames.map(g => gameTrends(modal.date, g));
+        return <GameModal m={{ date:modal.date, games:openGames, trends:openTrends, idx:modal.idx }}
+          tags={tags} setTag={setTag} now={now} onClose={()=>setModal(null)}
+          ensureBattingLine={ensureBattingLine} />;
+      })()}
     </div>
   );
 }
@@ -3032,13 +3030,22 @@ function MatchupTitle({ away, home }) {
   );
 }
 
-function GameModal({ m, tags, setTag, now, onClose }) {
+function GameModal({ m, tags, setTag, now, onClose, ensureBattingLine }) {
   const { date, games, trends } = m;
   const [idx, setIdx] = useState(m.idx || 0);
   const g = games[idx];
   const t = trends[idx];
   const hasPrev = idx > 0, hasNext = idx < games.length - 1;
   const go = (delta) => { setTagEditing(false); setIdx(i => Math.min(games.length-1, Math.max(0, i+delta))); };
+
+  // the batting-score line (BAT number + hits, in each side's lineup
+  // column) is genuinely expensive to compute — a box-score fetch per
+  // recent game plus a season-rate fetch per pitcher involved — so it's
+  // only ever fetched here, once a game is actually open, for just its
+  // two teams. Re-fires when arrow-navigating to a different game.
+  useEffect(() => {
+    ensureBattingLine?.([g.awayId, g.homeId], g.time);
+  }, [g.awayId, g.homeId, g.time, ensureBattingLine]);
   const [awayLU, setAwayLU] = useState(null);
   const [homeLU, setHomeLU] = useState(null);
   const [h2h,    setH2H]    = useState(undefined);
