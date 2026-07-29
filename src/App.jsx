@@ -1456,7 +1456,7 @@ function Legend() {
 /* box geometry — the situational-trend boxes are still real bordered boxes;
    the pitcher/batter numbers are plain text but keep this same slot width
    so everything still lines up under the PITCHER/BATTER headers. */
-const BOX_W = 14, BOX_H = 13, BOX_GAP = 1.5, MID_GAP = 5;
+const BOX_W = 14, BOX_H = 13, BOX_GAP = 1.5;
 const PB_BOX_W = 21, PB_GAP = 2;
 const ERA_BOX_W = 26;   // wider than PB_BOX_W — "12.34" needs ~24px at this font, hits never do
 const MAIN_H = 19;                         // a team's row height
@@ -1700,24 +1700,14 @@ function LiveDiamond({ inningNum, inningState, outs, onFirst, onSecond, onThird,
   );
 }
 
-/* this team's probable starter's ERA/rematch-verdict + last 3 games'
-   quality-adjusted batting score, shown as the 4 pitcher/batter boxes. */
+/* this team's probable starter's season ERA + rematch-verdict. The last-3-
+   games batting trio that used to sit next to this lives in the game modal
+   now, alongside that game's trend indicators. */
 function pitcherBatterStats(t, tid) {
-  const [h3, h2, h1] = t.hitsTrio(tid);
-  return { era: t.pitcherEra(tid), verdict: t.rematchVerdict(tid), h3, h2, h1 };
+  return { era: t.pitcherEra(tid), verdict: t.rematchVerdict(tid) };
 }
-/* last 3 games' batting score (oldest to most recent), then the pitcher's
-   season ERA — no boxes, no header labels, just the numbers themselves. */
 function PBBoxRow({ s, dark }) {
-  return (
-    <div style={{ display:"flex", alignItems:"baseline", gap:PB_GAP }}>
-      <BatScoreNum score={s.h3} dark={dark} />
-      <BatScoreNum score={s.h2} dark={dark} />
-      <BatScoreNum score={s.h1} big dark={dark} />
-      <span style={{ width:MID_GAP, flexShrink:0 }} />
-      <EraNum era={s.era} verdict={s.verdict} dark={dark} />
-    </div>
-  );
+  return <EraNum era={s.era} verdict={s.verdict} dark={dark} />;
 }
 
 /* column 1 — Game: the two team lines, with a fixed-width slot next to the
@@ -1736,22 +1726,11 @@ function GameSection({ g, aw, hm, awWon, hmWon, final, live, dark }) {
   );
 }
 
-/* "BAT"/"ERA" column labels, plus a blank slot reserved the exact width of
-   the trend-box strip so the time/FINAL label (which fills that slot, see
-   StatsHeaderRow) lines up with the trend boxes one row below. Uses the
-   exact same gap as PBBoxRow so each label sits centered directly over its
-   numbers, not just its own slot. */
+/* "ERA" column label, sized to sit centered directly over EraNum below. */
 function PBHeaderLabels({ dark }) {
-  const label = (text, width) => (
-    <div style={{ width, textAlign:"center", fontFamily:MONO, fontSize:7, fontWeight:700,
-      letterSpacing:"0.05em", color: dark?C.darkTextSoft:C.inkSoft }}>{text}</div>
-  );
   return (
-    <div style={{ display:"flex", alignItems:"center", gap:PB_GAP }}>
-      {label("BAT", PB_BOX_W*3+PB_GAP*2)}
-      <span style={{ width:MID_GAP, flexShrink:0 }} />
-      {label("ERA", ERA_BOX_W)}
-    </div>
+    <div style={{ width:ERA_BOX_W, textAlign:"center", fontFamily:MONO, fontSize:7, fontWeight:700,
+      letterSpacing:"0.05em", color: dark?C.darkTextSoft:C.inkSoft }}>ERA</div>
   );
 }
 
