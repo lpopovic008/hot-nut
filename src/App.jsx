@@ -204,7 +204,6 @@ function pitcherLineColors(st, season) {
   }
   return { ipCol, hCol, erCol, bbCol, kCol };
 }
-const ord = (n) => n + (["th","st","nd","rd"][(n%100>>3^1&&n%10)||0] || "th");
 // tags may be an old plain string or the new { text, away, home, date } object
 const tagText = (entry) => !entry ? "" : (typeof entry === "string" ? entry : (entry.text || ""));
 // settled-bet tint for a tagged game's exported background: W/L/P -> color, else null
@@ -1453,10 +1452,6 @@ function Legend() {
     </div>
   );
 }
-function Pill({ children, color, title, textColor="#fff" }) {
-  return <span title={title} style={{ fontFamily:MONO, fontSize:8.5, letterSpacing:"0.04em",
-    color:textColor, background:color, borderRadius:2, padding:"1px 4px" }}>{children}</span>;
-}
 
 /* box geometry — the situational-trend boxes are still real bordered boxes;
    the pitcher/batter numbers are plain text but keep this same slot width
@@ -1572,6 +1567,54 @@ function TrendBox({ present, color, title, inner, dark }) {
       {present && inner && <span style={{ fontFamily:MONO, fontSize:9, fontWeight:800,
         color:"#fff", lineHeight:1 }}>{inner}</span>}
     </span>
+  );
+}
+
+const TREND_CHIP_W = 62;
+
+/* the game-modal version of TrendBox — same slot order/colors as the
+   homepage schedule's grid, but wide enough to spell the label out instead
+   of just lighting a colored square, since there's room here that the
+   calendar card doesn't have. */
+function TrendChip({ slot, present }) {
+  return (
+    <span title={slot.desc} style={{ width:TREND_CHIP_W, flexShrink:0, boxSizing:"border-box",
+      fontFamily:MONO, fontSize:8.5, fontWeight:700, textAlign:"center",
+      whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis",
+      padding:"3px 4px", borderRadius:3,
+      background: present ? slot.color : "transparent",
+      color: present ? "#fff" : C.ruleDark,
+      border: present ? "none" : `1px solid ${C.rule}` }}>
+      {present ? slot.label : ""}
+    </span>
+  );
+}
+
+/* last-3-games batting score trio, on its own (no ERA box next to it —
+   that's already shown elsewhere in the modal, on the pitching line). */
+function BattingTrio({ h3, h2, h1 }) {
+  return (
+    <div style={{ display:"flex", alignItems:"baseline", gap:PB_GAP, flexShrink:0 }}>
+      <BatScoreNum score={h3} />
+      <BatScoreNum score={h2} />
+      <BatScoreNum score={h1} big />
+    </div>
+  );
+}
+
+/* one team's line in the game modal: batting trio on the left, this game's
+   situational-trend indicators typed out (not just colored boxes) in the
+   homepage grid's own fixed slot order on the right. */
+function TrendRow({ tid, t }) {
+  const [h3, h2, h1] = t.hitsTrio(tid);
+  const keys = t.keysFor(tid);
+  return (
+    <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:10, flexWrap:"wrap" }}>
+      <BattingTrio h3={h3} h2={h2} h1={h1} />
+      <div style={{ display:"flex", gap:4 }}>
+        {TREND_SLOTS.map(slot => <TrendChip key={slot.key} slot={slot} present={keys.has(slot.key)} />)}
+      </div>
+    </div>
   );
 }
 
@@ -2156,27 +2199,10 @@ function PitcherSeasonModal({ pid, name, onClose, upcoming }) {
     </div>
   );
 }
-function PitcherBlock({ name, pid, vsName, info, oppTeamId, date, bare }) {
+// pitcher name + matchup only — click the name to check their full season
+// log (which highlights this exact rematch, if any) in PitcherSeasonModal.
+function PitcherBlock({ name, pid, vsName, oppTeamId, date, bare }) {
   const [showLog, setShowLog] = useState(false);
-  // the opposing lineup's own season hitting rates — the baseline each row's
-  // pitcher score below is judged against — plus, per start, how that
-  // lineup was hitting (their own quality-adjusted score and raw hits) in
-  // the game right before this one, for "hot or cold bats" context.
-  const [oppRates, setOppRates] = useState(undefined);
-  const [priorCtx, setPriorCtx] = useState({});   // start date -> {score, hits}
-  useEffect(() => {
-    if (!oppTeamId || !info?.vs?.length) return;
-    let alive = true;
-    loadTeamSeasonHitting(oppTeamId).then(r => { if (alive) setOppRates(r); });
-    (async () => {
-      const results = await mapPool(info.vs, 3, async (s) => [s.date, await loadPriorGameContext(oppTeamId, s.date)]);
-      if (!alive) return;
-      const map = {};
-      results.forEach(([date, ctx]) => { map[date] = ctx || { score:null, hits:null }; });
-      setPriorCtx(map);
-    })();
-    return () => { alive = false; };
-  }, [oppTeamId, info]);
   return (
     <div style={ bare ? {} : { borderTop:`1px solid ${C.rule}`, padding:"12px 0" }}>
       <div style={{ fontFamily:SANS, fontSize:15, fontWeight:700 }}>
@@ -2189,44 +2215,9 @@ function PitcherBlock({ name, pid, vsName, info, oppTeamId, date, bare }) {
         <span style={{ fontFamily:MONO, fontSize:11, color:C.inkSoft, fontWeight:400 }}>
           {"  vs "}{vsName}</span>
       </div>
-      {!name ? (
+      {!name && (
         <div style={{ fontFamily:SANS, fontSize:13, color:C.inkSoft, marginTop:4 }}>
           No probable starter posted yet.</div>
-      ) : info === undefined ? (
-        <div style={{ fontFamily:MONO, fontSize:12, color:C.inkSoft, marginTop:6 }}>Loading…</div>
-      ) : !info ? (
-        <div style={{ fontFamily:SANS, fontSize:13, color:C.inkSoft, marginTop:4 }}>
-          No {SEASON} game log found.</div>
-      ) : (
-        <div style={{ marginTop:8 }}>
-          <div style={{ fontFamily:MONO, fontSize:10, letterSpacing:"0.1em",
-            textTransform:"uppercase", color:C.rematch, marginBottom:6 }}>
-            This season vs {vsName} · {info.vs.length} start{info.vs.length===1?"":"s"}</div>
-          {info.vs.length===0 ? (
-            <div style={{ fontFamily:SANS, fontSize:13, color:C.inkSoft }}>
-              Has not faced them this season.</div>
-          ) : (
-            <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
-              <div style={{ display:"flex", gap:10, alignItems:"baseline" }}>
-                <span style={{ minWidth:34, flexShrink:0 }} />
-                <span style={{ flex:"1 1 auto", minWidth:0 }}><PLineHeader extra /></span>
-              </div>
-              {info.vs.map((s,i)=>{
-                const pitcherScore = oppRates===undefined ? undefined : pitcherScoreForStart(s.stat, oppRates);
-                const ctx = priorCtx[s.date];
-                return (
-                <div key={i} style={{ display:"flex", justifyContent:"space-between",
-                  gap:10, alignItems:"baseline", borderBottom:`1px solid #EEF0F2`, paddingBottom:4 }}>
-                  <span style={{ fontFamily:MONO, fontSize:11, color:C.inkSoft, minWidth:34, flexShrink:0 }}>{calDay(s.date).md}</span>
-                  <span style={{ fontFamily:MONO, flex:"1 1 auto", minWidth:0 }}>
-                    <PLine s={s} season={info.season} maxSize={13} extra={{
-                      pitcherScore, priorScore: ctx?.score, priorHits: ctx?.hits }} /></span>
-                </div>
-                );
-              })}
-            </div>
-          )}
-        </div>
       )}
       {showLog && <PitcherSeasonModal pid={pid} name={name} onClose={()=>setShowLog(false)}
         upcoming={oppTeamId && date ? { teamId:oppTeamId, date } : null} />}
@@ -2511,22 +2502,6 @@ async function loadLineup(game, side, date) {
   } catch { return { source:"none", players:[] }; }
 }
 
-// a pitcher's prior starts vs a specific opponent this season (before `date`)
-async function loadPitcherVs(pid, oppId, date) {
-  if (!pid) return null;
-  try {
-    const r = await fetch(`${API}/people/${pid}/stats?stats=gameLog&group=pitching&season=${SEASON}&gameType=R`);
-    if (!r.ok) return null;
-    const j = await r.json();
-    const splits = (j.stats?.[0]?.splits||[]).slice().sort((a,b)=>a.date.localeCompare(b.date));
-    const prior = splits.filter(s=>s.date < date);
-    // Number(...) on both sides — the opponent id can come back as a string
-    // in some API responses, which would silently fail a strict === match
-    // and make a real rematch look like it never happened
-    return { vs: prior.filter(s=>Number(s.opponent?.id)===Number(oppId)), season: pitcherSeasonAverages(prior) };
-  } catch { return null; }
-}
-
 // a team's season-long hitting output, converted to a "per team-game" rate
 // — used the same way a pitcher's own season H9/BB9/HR9 rates judge a
 // batting performance, just flipped to judge a PITCHER's start against the
@@ -2711,7 +2686,7 @@ async function loadBatterVs(batterId, pitcherId) {
 
 /* one team's column: lineup of 9 hitters, then its starting pitcher block below */
 const HV_COLS = "14px minmax(40px,1fr) 34px 34px 30px 48px";   // # name AB H HR AVG
-function TeamPanel({ teamName, lineup, oppName, pitcherName, pitcherId, pitcherInfo, onStat, oppPitcherName, oppPitcherId, oppTeamId, date, showBoxPitching, boxPitchers, final }) {
+function TeamPanel({ teamName, lineup, oppName, pitcherName, pitcherId, onStat, oppPitcherName, oppPitcherId, oppTeamId, date, showBoxPitching, boxPitchers, final }) {
   const canVs = !!oppPitcherId && !!oppPitcherName;
   // null = neither tab open, nothing shown yet — tapping a tab opens it,
   // tapping the already-open tab closes it again (accordion, not a toggle
@@ -2861,7 +2836,7 @@ function TeamPanel({ teamName, lineup, oppName, pitcherName, pitcherId, pitcherI
           <>
             <div style={{ fontFamily:MONO, fontSize:9, letterSpacing:"0.12em", textTransform:"uppercase",
               color:C.ruleDark, marginBottom:4 }}>Starting pitcher</div>
-            <PitcherBlock name={pitcherName} pid={pitcherId} vsName={oppName} info={pitcherInfo} oppTeamId={oppTeamId} date={date} bare />
+            <PitcherBlock name={pitcherName} pid={pitcherId} vsName={oppName} oppTeamId={oppTeamId} date={date} bare />
             {/* the probable "starter" is sometimes just a 1-2 inning opener —
                 let the viewer look up the actual bulk pitcher alongside them */}
             <AddPitcherBlock oppName={oppName} oppTeamId={oppTeamId} date={date} />
@@ -2881,14 +2856,6 @@ function AddPitcherBlock({ oppName, oppTeamId, date }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [added, setAdded] = useState(null);      // { id, name }
-  const [info, setInfo] = useState(undefined);   // same shape as pitcherInfo
-
-  useEffect(() => {
-    if (!added) return;
-    let alive = true;
-    loadPitcherVs(added.id, oppTeamId, date).then(r => { if (alive) setInfo(r); });
-    return () => { alive = false; };
-  }, [added, oppTeamId, date]);
 
   const resolve = async () => {
     const q = query.trim();
@@ -2912,11 +2879,11 @@ function AddPitcherBlock({ oppName, oppTeamId, date }) {
   if (added) {
     return (
       <div style={{ marginTop:10, paddingTop:10, borderTop:`1px solid ${C.rule}`, position:"relative" }}>
-        <button onClick={()=>{ setAdded(null); setInfo(undefined); }} title="Remove this pitcher"
+        <button onClick={()=>setAdded(null)} title="Remove this pitcher"
           aria-label="Remove this pitcher"
           style={{ position:"absolute", top:8, right:0, border:"none", background:"transparent",
             color:C.inkSoft, cursor:"pointer", fontFamily:MONO, fontSize:13, padding:4, lineHeight:1 }}>✕</button>
-        <PitcherBlock name={added.name} pid={added.id} vsName={oppName} info={info} oppTeamId={oppTeamId} date={date} bare />
+        <PitcherBlock name={added.name} pid={added.id} vsName={oppName} oppTeamId={oppTeamId} date={date} bare />
       </div>
     );
   }
@@ -2982,8 +2949,6 @@ function GameModal({ m, tags, setTag, now, onClose }) {
   const go = (delta) => { setTagEditing(false); setIdx(i => Math.min(games.length-1, Math.max(0, i+delta))); };
   const [awayLU, setAwayLU] = useState(null);
   const [homeLU, setHomeLU] = useState(null);
-  const [awayP,  setAwayP]  = useState(undefined);   // away SP vs home
-  const [homeP,  setHomeP]  = useState(undefined);   // home SP vs away
   const [h2h,    setH2H]    = useState(undefined);
   const [h2hOpen, setH2hOpen] = useState(false);
   const [pick,   setPick]   = useState(null);   // {name, stat, ts} -> prop analyzer
@@ -3081,9 +3046,6 @@ function GameModal({ m, tags, setTag, now, onClose }) {
       // H2H summary (top-of-modal overview)
       try { const s = await loadH2H(g.awayId, g.homeId); if(alive) setH2H(s); }
       catch { if(alive) setH2H(null); }
-      // pitchers vs opposing team
-      loadPitcherVs(g.awayPid, g.homeId, date).then(r=>{ if(alive) setAwayP(r); });
-      loadPitcherVs(g.homePid, g.awayId, date).then(r=>{ if(alive) setHomeP(r); });
       // lineups + per-batter trends
       for (const side of ["away","home"]) {
         loadLineup(g._raw, side, date).then(async lu=>{
@@ -3329,30 +3291,27 @@ function GameModal({ m, tags, setTag, now, onClose }) {
           )}
         </div>
 
-        {/* trend pills, if any */}
-        {t && t.any && (
-          <div style={{ display:"flex", gap:5, flexWrap:"wrap", padding:"10px 18px 2px" }}>
-            {t.travel && <Pill color={C.travel} title="Played out west yesterday, East today on back-to-back days">B2B travel</Pill>}
-            {t.echo.map((e,i)=><Pill key={i} color={C.echo} title="Just snapped a 10+ game win or loss streak yesterday">streak echo → {e.predicted==="W"?"win":"loss"}</Pill>)}
-            {t.cb.map((c,i)=><Pill key={i} color={C.late} title="Never led until the 8th inning or later yesterday">late go-ahead {ord(c.inning)}</Pill>)}
-            {t.rematch.map((r,i)=><Pill key={i} color={C.rematch} title="Has faced this pitcher this year already">pitcher rematch</Pill>)}
-            {t.bigday.map((b,i)=><Pill key={i} color={C.bigday} title="Scored 10+ runs in their last game">{b.team.split(" ").slice(-1)[0]} {b.runs} runs last game</Pill>)}
-            {t.gauntlet.map((x,i)=><Pill key={i} color={C.gauntlet} title="Just faced 2-3 straight starters with a sub-3.00 ERA">the gauntlet ({x.len})</Pill>)}
-            {t.formerTeam.map((x,i)=><Pill key={i} color={C.revenge} title="Spent 2+ seasons on the team he's facing today">revenge game vs {x.opp.split(" ").slice(-1)[0]}</Pill>)}
+        {/* batting trio + situational-trend indicators, one row per team —
+            trio on the left, this game's trends spelled out on the right in
+            the same fixed slot order/colors as the homepage schedule grid */}
+        {t && (
+          <div style={{ display:"flex", flexDirection:"column", gap:6, padding:"10px 18px 2px" }}>
+            <TrendRow tid={g.awayId} t={t} />
+            <TrendRow tid={g.homeId} t={t} />
           </div>
         )}
 
         {/* ── lineups: away left, home right (stack on mobile) ── */}
         <div className="ts-lineups" style={{ gap:0 }}>
           <TeamPanel teamName={g.awayName} oppName={g.homeName}
-            lineup={awayLU} pitcherName={g.awayPname} pitcherId={g.awayPid} pitcherInfo={awayP}
+            lineup={awayLU} pitcherName={g.awayPname} pitcherId={g.awayPid}
             oppPitcherName={g.homePname} oppPitcherId={g.homePid}
             oppTeamId={g.homeId} date={date}
             showBoxPitching={showBoxPitching} boxPitchers={boxPitching?.away} final={final}
             onStat={(name,stat)=>setPick({ name, stat, ts:Date.now() })} />
           <div style={{ borderLeft:`1px solid ${C.rule}` }} className="ts-h2h-divider">
             <TeamPanel teamName={g.homeName} oppName={g.awayName}
-              lineup={homeLU} pitcherName={g.homePname} pitcherId={g.homePid} pitcherInfo={homeP}
+              lineup={homeLU} pitcherName={g.homePname} pitcherId={g.homePid}
               oppPitcherName={g.awayPname} oppPitcherId={g.awayPid}
               oppTeamId={g.awayId} date={date}
               showBoxPitching={showBoxPitching} boxPitchers={boxPitching?.home} final={final}
