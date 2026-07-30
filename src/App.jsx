@@ -1545,42 +1545,61 @@ function EraNum({ era, verdict, dark }) {
 
 /* one of the team's last 5 games' quality-adjusted batting score (0-10, 5.0
    = exactly the times-on-base + total-bases production the pitching staff
-   they faced that day would be expected to allow) with the game's actual
-   hit count underneath it. No border, just a soft highlight fill on the
-   score. Soft green at 7.0+ ("hot"), soft red at 3.0 or below ("cold") — the
-   text itself always stays its resting color, never tinted. The most recent
-   game is drawn in the largest size; older games step down in two tiers. */
-function BattingBox({ score, hits, scoreSize, hitsSize, emphasize }) {
+   they faced that day would be expected to allow), with the game's actual
+   hit count in a separate row underneath it (see BattingFive) — two rows of
+   5 cells each, rather than 5 independently-sized stacked boxes, so all 5
+   scores share one text baseline (and all 5 hit counts share another)
+   regardless of the size tier a given slot is drawn at. No border, just a
+   soft highlight fill on the score. Soft green at 7.0+ ("hot"), soft red at
+   3.0 or below ("cold") — the text itself always stays its resting color,
+   never tinted. The most recent game is drawn in the largest size; older
+   games step down in two tiers. */
+function BattingScoreCell({ score, size, emphasize }) {
   const has = score != null;
   const bg = has && score>=7.0 ? C.softOver : has && score<=3.0 ? C.softUnder : "transparent";
   const color = has ? (emphasize ? C.ink : C.ruleDark) : C.ruleDark;
   // "10.0" (the one 4-char case, at the very top of the scale) doesn't fit
-  // this box at this font size even with the dot tightened up — drop the
-  // decimal just for that ceiling value rather than widen the box.
+  // this cell at this font size even with the dot tightened up — drop the
+  // decimal just for that ceiling value rather than widen the cell.
   const label = has ? (score.toFixed(1)==="10.0" ? "10" : score.toFixed(1)) : "–";
   return (
-    <div title={emphasize ? "Batting score, last game (hits below)" : "Batting score (hits below)"}
-      style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:1, flex:1, minWidth:0,
+    <span title={emphasize ? "Batting score, last game" : "Batting score"}
+      style={{ flex:1, minWidth:0, textAlign:"center", whiteSpace:"nowrap",
+        fontFamily:MONO, fontSize:size, fontWeight:emphasize?700:400, color,
         background:bg, borderRadius:3, padding:"2px 2px",
         transition:"background 0.4s ease, color 0.4s ease" }}>
-      <span style={{ fontFamily:MONO, fontSize:scoreSize, fontWeight:emphasize?700:400, color,
-        whiteSpace:"nowrap" }}>{has ? <TightDecimal text={label} /> : "–"}</span>
-      <span style={{ fontFamily:MONO, fontSize:hitsSize, color:C.ruleDark,
-        whiteSpace:"nowrap" }}>{hits!=null ? hits : "–"}</span>
-    </div>
+      {has ? <TightDecimal text={label} /> : "–"}
+    </span>
+  );
+}
+function BattingHitsCell({ hits, size }) {
+  return (
+    <span title="Hits that game" style={{ flex:1, minWidth:0, textAlign:"center", whiteSpace:"nowrap",
+      fontFamily:MONO, fontSize:size, color:C.ruleDark }}>
+      {hits!=null ? hits : "–"}
+    </span>
   );
 }
 // oldest → newest sizing tiers: games 4-5-back smallest, 2-3-back medium,
-// most recent largest — applied to both the score and the hits number.
+// most recent largest — applied to both the score and the hits row.
 const BAT5_SCORE_SIZES = [9, 9, 10.5, 10.5, 13];
 const BAT5_HITS_SIZES  = [7, 7, 7.5, 7.5, 9];
-/* one team's last 5 games — score-over-hits, oldest to newest — shown
-   underneath its starting-pitcher box and above its lineup. */
+/* one team's last 5 games — a score row and a hits row, oldest to newest —
+   shown underneath its starting-pitcher box and above its lineup.
+   alignItems:"baseline" on each row is what actually keeps every slot
+   level despite their different font sizes — differently-sized inline
+   text still shares one baseline, unlike stacking whole differently-tall
+   boxes and aligning their edges. */
 function BattingFive({ games }) {
   return (
-    <div style={{ display:"flex", alignItems:"flex-end", gap:3 }}>
-      {games.map((gm,i) => <BattingBox key={i} score={gm.score} hits={gm.hits}
-        scoreSize={BAT5_SCORE_SIZES[i]} hitsSize={BAT5_HITS_SIZES[i]} emphasize={i===games.length-1} />)}
+    <div style={{ display:"flex", flexDirection:"column", gap:2 }}>
+      <div style={{ display:"flex", alignItems:"baseline", gap:3 }}>
+        {games.map((gm,i) => <BattingScoreCell key={i} score={gm.score}
+          size={BAT5_SCORE_SIZES[i]} emphasize={i===games.length-1} />)}
+      </div>
+      <div style={{ display:"flex", alignItems:"baseline", gap:3 }}>
+        {games.map((gm,i) => <BattingHitsCell key={i} hits={gm.hits} size={BAT5_HITS_SIZES[i]} />)}
+      </div>
     </div>
   );
 }
@@ -2050,6 +2069,24 @@ async function loadPitcherSeason(pid) {
   } catch { return []; }
 }
 
+// a pitcher's prior starts vs a specific opponent this season (before `date`)
+// — powers the colored IP/H/ER/BB/K history shown in the starting-pitcher
+// box, only fetched once that box is actually on screen (see PitcherBlock).
+async function loadPitcherVs(pid, oppId, date) {
+  if (!pid) return null;
+  try {
+    const r = await fetch(`${API}/people/${pid}/stats?stats=gameLog&group=pitching&season=${SEASON}&gameType=R`);
+    if (!r.ok) return null;
+    const j = await r.json();
+    const splits = (j.stats?.[0]?.splits||[]).slice().sort((a,b)=>a.date.localeCompare(b.date));
+    const prior = splits.filter(s=>s.date < date);
+    // Number(...) on both sides — the opponent id can come back as a string
+    // in some API responses, which would silently fail a strict === match
+    // and make a real rematch look like it never happened
+    return { vs: prior.filter(s=>Number(s.opponent?.id)===Number(oppId)), season: pitcherSeasonAverages(prior) };
+  } catch { return null; }
+}
+
 function PitcherSeasonModal({ pid, name, onClose, upcoming }) {
   const [log, setLog] = useState(undefined);
   useEffect(() => {
@@ -2217,32 +2254,91 @@ function PitcherSeasonModal({ pid, name, onClose, upcoming }) {
 // this exact rematch, if any) in PitcherSeasonModal.
 function PitcherBlock({ name, pid, vsName, era, oppTeamId, date, bare }) {
   const [showLog, setShowLog] = useState(false);
+  // this season's prior starts vs this exact opponent, if any — fetched
+  // only while this box is actually on screen (i.e. once a game's modal
+  // is open), same as the added-pitcher's own era fetch below.
+  const [info, setInfo] = useState(undefined);   // { vs:[...], season } | null
+  useEffect(() => {
+    let alive = true;
+    if (!pid || !oppTeamId || !date) {
+      Promise.resolve().then(() => { if (alive) setInfo(undefined); });
+      return () => { alive = false; };
+    }
+    loadPitcherVs(pid, oppTeamId, date).then(r => { if (alive) setInfo(r); });
+    return () => { alive = false; };
+  }, [pid, oppTeamId, date]);
+
+  const oppAbbr = TEAM_ABBR[oppTeamId] || vsName;
+  const nameEl = !name ? <span style={{ color:C.darkTextSoft }}>TBD</span> : pid ? (
+    <button onClick={()=>setShowLog(true)} title={`${name} — ${SEASON} game log`}
+      style={{ font:"inherit", fontWeight:700, color:C.darkText, cursor:"pointer",
+        border:"none", background:"transparent", padding:0,
+        textDecoration:"underline", textDecorationColor:C.darkText, textUnderlineOffset:2 }}>{name}</button>
+  ) : <span style={{ color:C.darkText }}>{name}</span>;
+  const badge = <ConfirmBadge confirmed={!!name} color={C.darkTextSoft}
+    title={name ? "Probable starter confirmed" : "Probable starter not yet announced"} />;
+  const eraEl = name && (
+    <span style={{ fontFamily:MONO, fontSize:15, fontWeight:700, color:C.darkText, whiteSpace:"nowrap" }}>
+      {era!=null ? era.toFixed(2) : "–"}</span>
+  );
+
   return (
     <div style={ bare ? {} : { borderTop:`1px solid ${C.darkBorder}`, padding:"12px 0" }}>
-      <div style={{ display:"flex", alignItems:"baseline", justifyContent:"space-between", gap:8 }}>
-        <div style={{ fontFamily:SANS, fontSize:15, fontWeight:700, minWidth:0 }}>
-          {!name ? <span style={{ color:C.darkTextSoft }}>TBD</span> : pid ? (
-            <button onClick={()=>setShowLog(true)} title={`${name} — ${SEASON} game log`}
-              style={{ font:"inherit", fontWeight:700, color:C.darkText, cursor:"pointer",
-                border:"none", background:"transparent", padding:0,
-                textDecoration:"underline", textDecorationColor:C.darkText, textUnderlineOffset:2 }}>{name}</button>
-          ) : <span style={{ color:C.darkText }}>{name}</span>}
+      {/* wide layout: one row, name+vs-team on the left (truncates as a
+          single unit rather than wrapping — a wrapped second line here used
+          to run straight into whatever sits below it), badge+era right */}
+      <div className="ts-pitcher-head-wide" style={{ display:"flex", alignItems:"baseline", justifyContent:"space-between", gap:8 }}>
+        <div style={{ fontFamily:SANS, fontSize:15, fontWeight:700, minWidth:0,
+          whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>
+          {nameEl}
           <span style={{ fontFamily:MONO, fontSize:11, color:C.darkTextSoft, fontWeight:400 }}>
             {"  vs "}{vsName}</span>
         </div>
         <span style={{ display:"flex", alignItems:"center", gap:6, flexShrink:0 }}>
-          <ConfirmBadge confirmed={!!name} color={C.darkTextSoft}
-            title={name ? "Probable starter confirmed" : "Probable starter not yet announced"} />
-          {name && (
-            <span style={{ fontFamily:MONO, fontSize:15, fontWeight:700, color:C.darkText }}>
-              {era!=null ? era.toFixed(2) : "–"}</span>
-          )}
+          {badge}{eraEl}
         </span>
       </div>
+
+      {/* narrow layout: name (+ badge) on its own row; "vs ABB" + ERA below */}
+      <div className="ts-pitcher-head-narrow">
+        <div style={{ display:"flex", alignItems:"baseline", justifyContent:"space-between", gap:8 }}>
+          <div style={{ fontFamily:SANS, fontSize:15, fontWeight:700, minWidth:0,
+            whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{nameEl}</div>
+          {badge}
+        </div>
+        <div style={{ display:"flex", alignItems:"baseline", justifyContent:"space-between", gap:8, marginTop:2 }}>
+          <span style={{ fontFamily:MONO, fontSize:11, color:C.darkTextSoft, fontWeight:400 }}>
+            vs {oppAbbr}</span>
+          {eraEl}
+        </div>
+      </div>
+
       {!name && (
         <div style={{ fontFamily:SANS, fontSize:13, color:C.darkTextSoft, marginTop:4 }}>
           No probable starter posted yet.</div>
       )}
+
+      {/* prior starts vs this opponent this season, color-coded the same
+          way the season log modal colors them — only shown when there's
+          actual history, and always with clear room below the header row
+          so nothing overlaps it. */}
+      {name && info?.vs?.length>0 && (
+        <div style={{ marginTop:10, display:"flex", flexDirection:"column", gap:6 }}>
+          <div style={{ display:"flex", gap:8, alignItems:"baseline" }}>
+            <span style={{ width:34, flexShrink:0 }} />
+            <span style={{ flex:"1 1 auto", minWidth:0 }}><PLineHeader dark /></span>
+          </div>
+          {info.vs.map((s,i)=>(
+            <div key={i} style={{ display:"flex", gap:8, alignItems:"baseline" }}>
+              <span style={{ fontFamily:MONO, fontSize:10.5, color:C.darkTextSoft, width:34, flexShrink:0 }}>
+                {calDay(s.date).md}</span>
+              <span style={{ flex:"1 1 auto", minWidth:0 }}>
+                <PLine s={s} season={info.season} maxSize={12} dark /></span>
+            </div>
+          ))}
+        </div>
+      )}
+
       {showLog && <PitcherSeasonModal pid={pid} name={name} onClose={()=>setShowLog(false)}
         upcoming={oppTeamId && date ? { teamId:oppTeamId, date } : null} />}
     </div>
@@ -2251,7 +2347,7 @@ function PitcherBlock({ name, pid, vsName, era, oppTeamId, date, bare }) {
 
 // one pitcher's line in the game's box score — name opens the same season
 // game-log modal as everywhere else.
-function PitcherStatLine({ p, final }) {
+function PitcherStatLine({ p }) {
   const [showLog, setShowLog] = useState(false);
   // same season-average context the season game-log modal colors its rows
   // against, so this game's line and that modal agree on what's good/bad.
@@ -2270,10 +2366,10 @@ function PitcherStatLine({ p, final }) {
             textDecoration:"underline", textDecorationColor:C.darkText, textUnderlineOffset:2,
             textAlign:"left", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis",
             minWidth:0, flexShrink:1 }}>{p.name}</button>
-        {/* season ERA, box-score style — only once the game (and so this
-            line) is actually final, not while still live. Pinned to the
-            right edge of the pitching box, in line with the name. */}
-        {final && season?.era!=null && (
+        {/* season ERA, box-score style — shown pre-game, live, and final
+            alike (as soon as it's loaded). Pinned to the right edge of
+            the pitching box, in line with the name. */}
+        {season?.era!=null && (
           <span style={{ fontFamily:MONO, fontSize:11, color:C.darkTextSoft, flexShrink:0, marginLeft:"auto" }}>
             {season.era.toFixed(2)} ERA
           </span>
@@ -2710,7 +2806,7 @@ async function loadBatterVs(batterId, pitcherId) {
 
 /* one team's column: lineup of 9 hitters, then its starting pitcher block below */
 const HV_COLS = "14px minmax(40px,1fr) 34px 34px 30px 48px";   // # name AB H HR AVG
-function TeamPanel({ lineup, oppName, pitcherName, pitcherId, era, battingLine, onStat, oppPitcherName, oppPitcherId, oppTeamId, date, showBoxPitching, boxPitchers, final }) {
+function TeamPanel({ lineup, oppName, pitcherName, pitcherId, era, battingLine, onStat, oppPitcherName, oppPitcherId, oppTeamId, date, showBoxPitching, boxPitchers }) {
   const canVs = !!oppPitcherId && !!oppPitcherName;
   // the manually-added "bulk pitcher" (see AddPitcherBlock) is controlled
   // here, not inside that component, so it can also unlock its own
@@ -2794,7 +2890,7 @@ function TeamPanel({ lineup, oppName, pitcherName, pitcherId, era, battingLine, 
             ) : (
               <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
                 <PLineHeader dark />
-                {boxPitchers.map(p => <PitcherStatLine key={p.pid} p={p} final={final} />)}
+                {boxPitchers.map(p => <PitcherStatLine key={p.pid} p={p} />)}
               </div>
             )}
           </>
@@ -3353,7 +3449,7 @@ function GameModal({ m, tags, setTag, now, onClose, ensureBattingLine }) {
             oppPitcherName={g.homePname} oppPitcherId={g.homePid}
             oppTeamId={g.homeId} date={date} era={t ? t.pitcherEra(g.awayId) : null}
             battingLine={t ? t.hitsLine(g.awayId) : null}
-            showBoxPitching={showBoxPitching} boxPitchers={boxPitching?.away} final={final}
+            showBoxPitching={showBoxPitching} boxPitchers={boxPitching?.away}
             onStat={(name,stat)=>setPick({ name, stat, ts:Date.now() })} />
           <div style={{ borderLeft:`1px solid ${C.rule}` }} className="ts-h2h-divider">
             <TeamPanel oppName={g.awayName}
@@ -3361,7 +3457,7 @@ function GameModal({ m, tags, setTag, now, onClose, ensureBattingLine }) {
               oppPitcherName={g.awayPname} oppPitcherId={g.awayPid}
               oppTeamId={g.awayId} date={date} era={t ? t.pitcherEra(g.homeId) : null}
               battingLine={t ? t.hitsLine(g.homeId) : null}
-              showBoxPitching={showBoxPitching} boxPitchers={boxPitching?.home} final={final}
+              showBoxPitching={showBoxPitching} boxPitchers={boxPitching?.home}
               onStat={(name,stat)=>setPick({ name, stat, ts:Date.now() })} />
           </div>
         </div>
@@ -3433,6 +3529,7 @@ html, body { margin:0; padding:0; background:${C.paper}; overscroll-behavior-y:n
 .ts-app { padding:calc(28px + env(safe-area-inset-top)) calc(18px + env(safe-area-inset-right))
   calc(60px + env(safe-area-inset-bottom)) calc(18px + env(safe-area-inset-left)); }
 .ts-cell { box-sizing:border-box; }
+.ts-pitcher-head-narrow { display:none; }
 @media (max-width:760px){
   .ts-cal { grid-auto-flow:column; grid-auto-columns:89%; grid-template-columns:none;
             overflow-x:auto; scroll-snap-type:x mandatory; scroll-padding-left:0; }
@@ -3444,6 +3541,10 @@ html, body { margin:0; padding:0; background:${C.paper}; overscroll-behavior-y:n
   .ts-nav-inline { display:inline-flex !important; }
   .ts-modal-head { padding:10px 12px !important; gap:8px !important; }
   .ts-record-chart { flex:1 1 100% !important; min-width:0 !important; width:100%; }
+  /* starting-pitcher box: name+badge on its own row, "vs ABB"+ERA below —
+     the wide single-row layout gets cramped once the column is this narrow */
+  .ts-pitcher-head-wide { display:none !important; }
+  .ts-pitcher-head-narrow { display:block; }
 }
 * { -webkit-tap-highlight-color: transparent; }
 `;
