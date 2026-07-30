@@ -2842,8 +2842,11 @@ async function loadBatterVs(batterId, pitcherId) {
 /* one team's column: lineup of 9 hitters, then its starting pitcher block below */
 // condensed — these 4 stat columns only need to fit 1-2 digits / a .000 avg,
 // and this whole row already has to share a narrow panel with its mirrored
-// away/home twin, so keep them tight rather than let them bleed past the edge
-const HV_COLS = "minmax(40px,1fr) 24px 20px 20px 38px";   // name AB H HR AVG
+// away/home twin, so keep them as tight as possible to leave the hitter's
+// name the most room (see the vs-pitcher name/stat split in TeamPanel below,
+// where these columns sit fixed to the right of a horizontally-scrollable
+// name strip rather than in a single grid together).
+const VS_STAT_COLS = "20px 16px 16px 32px";   // AB H HR AVG
 function TeamPanel({ lineup, oppName, pitcherName, pitcherId, era, battingLine, onStat, oppPitcherName, oppPitcherId, oppTeamId, date, showBoxPitching, boxPitchers, col }) {
   const canVs = !!oppPitcherId && !!oppPitcherName;
   // the manually-added "bulk pitcher" (see AddPitcherBlock) is controlled
@@ -2983,12 +2986,14 @@ function TeamPanel({ lineup, oppName, pitcherName, pitcherId, era, battingLine, 
             <span style={{ textAlign:"center" }}>HRR</span>
           </div>
         ) : (
-          <div style={{ display:"grid", gridTemplateColumns:HV_COLS, gap:4, padding:"2px 10px",
+          <div style={{ display:"flex", gap:4, padding:"2px 10px",
             fontFamily:MONO, fontSize:9, letterSpacing:"0.04em", textTransform:"uppercase",
             color:C.ruleDark, alignItems:"center" }}>
-            <span>Hitter</span>
-            <span style={{ textAlign:"right" }}>AB</span><span style={{ textAlign:"right" }}>H</span>
-            <span style={{ textAlign:"right" }}>HR</span><span style={{ textAlign:"right" }}>AVG</span>
+            <span style={{ flex:"1 1 auto", minWidth:0 }}>Hitter</span>
+            <div style={{ display:"grid", gridTemplateColumns:VS_STAT_COLS, gap:3, flexShrink:0 }}>
+              <span style={{ textAlign:"right" }}>AB</span><span style={{ textAlign:"right" }}>H</span>
+              <span style={{ textAlign:"right" }}>HR</span><span style={{ textAlign:"right" }}>AVG</span>
+            </div>
           </div>
         ))}
 
@@ -2996,9 +3001,9 @@ function TeamPanel({ lineup, oppName, pitcherName, pitcherId, era, battingLine, 
         {view && lineup && lineup.players.length===0 &&
           <div style={{ padding:"8px 12px", fontFamily:SANS, fontSize:12, color:C.inkSoft }}>—</div>}
 
-        {view && lineup && lineup.players.map(p=>{
-          const hot = nameStreak(p);
-          if (view==="last5") {
+        {view && lineup && (view==="last5" ? (
+          lineup.players.map(p=>{
+            const hot = nameStreak(p);
             return (
             <div key={p.id} style={{ display:"grid", gridTemplateColumns:ROW_COLS, gap:6,
               padding:"3px 10px", alignItems:"center", borderTop:`1px solid #EEF0F2` }}>
@@ -3015,38 +3020,56 @@ function TeamPanel({ lineup, oppName, pitcherName, pitcherId, era, battingLine, 
               <SeqBlock arr={p.hrr} label="H+R+RBI" onPick={onStat && (()=>onStat(p.name,"hits+runs+rbi"))} />
             </div>
             );
-          }
-          // vs-pitcher view (either the opposing starter, or the added bulk pitcher)
-          const st = activeVsData[p.id];
-          return (
-          <div key={p.id} style={{ display:"grid", gridTemplateColumns:HV_COLS, gap:4,
-            padding:"3px 10px", alignItems:"center", borderTop:`1px solid #EEF0F2` }}>
-            <span style={{ fontFamily:SANS, fontSize:12.5, whiteSpace:"nowrap",
-              overflow:"hidden", textOverflow:"ellipsis" }} title={p.name}>
-              <span className="ts-hitter-full">{p.name}</span>
-              <span className="ts-hitter-abbr">{abbrevName(p.name)}</span>
-            </span>
-            {activeVsLoading && !st ? (
-              <span style={{ gridColumn:"2 / span 4", fontFamily:MONO, fontSize:10,
-                color:C.ruleDark, textAlign:"right" }}>…</span>
-            ) : !st || Number(st.atBats)===0 ? (
-              <span style={{ gridColumn:"2 / span 4", fontFamily:MONO, fontSize:10,
-                color:C.ruleDark, textAlign:"right" }}>no history</span>
-            ) : (
-              <>
-                <span style={{ fontFamily:MONO, fontSize:11, textAlign:"right", color:C.ink }}>{st.atBats}</span>
-                <span style={{ fontFamily:MONO, fontSize:11, textAlign:"right",
-                  color: Number(st.hits)>0?C.over:C.ink }}>{st.hits}</span>
-                <span style={{ fontFamily:MONO, fontSize:11, textAlign:"right",
-                  color: Number(st.homeRuns)>0?C.over:C.ink }}>{st.homeRuns}</span>
-                <span style={{ fontFamily:MONO, fontSize:11, textAlign:"right", fontWeight:700,
-                  color: (parseFloat(st.avg)||0) < 0.200 ? C.under
-                       : (parseFloat(st.avg)||0) > 0.250 ? C.over : C.ink }}>{st.avg}</span>
-              </>
-            )}
+          })
+        ) : (
+          // vs-pitcher view (either the opposing starter, or the added bulk
+          // pitcher) — the names and the AB/H/HR/AVG stats are two separate
+          // stacks side by side rather than one grid per row, so the names
+          // can scroll horizontally as a single unit (one shared scrollbar
+          // for the whole lineup, not one per row) while the stat columns
+          // stay pinned to the right edge.
+          <div style={{ display:"flex", gap:4, padding:"0 10px" }}>
+            <div className="ts-vs-names-scroll" style={{ flex:"1 1 auto", minWidth:0, overflowX:"auto" }}>
+              {lineup.players.map(p=>(
+                <div key={p.id} title={p.name} style={{ whiteSpace:"nowrap", padding:"3px 0",
+                  height:18, lineHeight:"18px", borderTop:`1px solid #EEF0F2`,
+                  fontFamily:SANS, fontSize:12.5 }}>
+                  <span className="ts-hitter-full">{p.name}</span>
+                  <span className="ts-hitter-abbr">{abbrevName(p.name)}</span>
+                </div>
+              ))}
+            </div>
+            <div style={{ flexShrink:0 }}>
+              {lineup.players.map(p=>{
+                const st = activeVsData[p.id];
+                return (
+                <div key={p.id} style={{ display:"grid", gridTemplateColumns:VS_STAT_COLS, gap:3,
+                  padding:"3px 0", height:18, lineHeight:"18px", alignItems:"center",
+                  borderTop:`1px solid #EEF0F2` }}>
+                  {activeVsLoading && !st ? (
+                    <span style={{ gridColumn:"1 / span 4", fontFamily:MONO, fontSize:10,
+                      color:C.ruleDark, textAlign:"right" }}>…</span>
+                  ) : !st || Number(st.atBats)===0 ? (
+                    <span style={{ gridColumn:"1 / span 4", fontFamily:MONO, fontSize:10,
+                      color:C.ruleDark, textAlign:"right" }}>no history</span>
+                  ) : (
+                    <>
+                      <span style={{ fontFamily:MONO, fontSize:11, textAlign:"right", color:C.ink }}>{st.atBats}</span>
+                      <span style={{ fontFamily:MONO, fontSize:11, textAlign:"right",
+                        color: Number(st.hits)>0?C.over:C.ink }}>{st.hits}</span>
+                      <span style={{ fontFamily:MONO, fontSize:11, textAlign:"right",
+                        color: Number(st.homeRuns)>0?C.over:C.ink }}>{st.homeRuns}</span>
+                      <span style={{ fontFamily:MONO, fontSize:11, textAlign:"right", fontWeight:700,
+                        color: (parseFloat(st.avg)||0) < 0.200 ? C.under
+                             : (parseFloat(st.avg)||0) > 0.250 ? C.over : C.ink }}>{st.avg}</span>
+                    </>
+                  )}
+                </div>
+                );
+              })}
+            </div>
           </div>
-          );
-        })}
+        ))}
         {view==="vssp" && !canVs && (
           <div style={{ padding:"8px 12px", fontFamily:SANS, fontSize:12, color:C.inkSoft }}>
             No probable starter posted for {oppName} yet.</div>)}
@@ -3591,6 +3614,12 @@ html, body { margin:0; padding:0; background:${C.paper}; overscroll-behavior-y:n
 .ts-cell { box-sizing:border-box; }
 .ts-pitcher-head-narrow { display:none; }
 .ts-hitter-abbr { display:none; }
+/* vs-pitcher hitter names: one shared horizontal scroller for the whole
+   lineup (not one per row) — momentum scroll on touch, thin/invisible
+   scrollbar so it doesn't compete visually with the AB/H/HR/AVG columns. */
+.ts-vs-names-scroll { -webkit-overflow-scrolling:touch; scrollbar-width:thin; }
+.ts-vs-names-scroll::-webkit-scrollbar { height:3px; }
+.ts-vs-names-scroll::-webkit-scrollbar-thumb { background:${C.ruleDark}; border-radius:2px; }
 @media (max-width:760px){
   .ts-cal { grid-auto-flow:column; grid-auto-columns:89%; grid-template-columns:none;
             overflow-x:auto; scroll-snap-type:x mandatory; scroll-padding-left:0; }
