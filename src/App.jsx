@@ -576,7 +576,7 @@ function ConfirmBadge({ confirmed, color = C.ruleDark, size = 13, title }) {
   );
 }
 
-const ROW_COLS = "14px minmax(36px,1fr) 30px 60px 9px 60px 9px 60px";
+const ROW_COLS = "minmax(36px,1fr) 30px 60px 9px 60px 9px 60px";
 const SEP = <span style={{ textAlign:"center", fontFamily:MONO, fontSize:12,
   color:C.ruleDark, fontWeight:700 }}>|</span>;
 
@@ -594,6 +594,15 @@ function last3Same(arr, fn) {
 function nameStreak(p) {
   return [last3Same(p.h, CAT.ht), last3Same(p.tb, CAT.ht), last3Same(p.hrr, CAT.ht)]
     .some(x => x === "r" || x === "g");
+}
+
+// "Aaron Judge" -> "A. Judge" — mobile-only lineup rows, where there's no
+// room for the full first name alongside the stat columns
+function abbrevName(name) {
+  if (!name) return name;
+  const parts = name.trim().split(/\s+/);
+  if (parts.length < 2) return name;
+  return `${parts[0][0]}. ${parts.slice(1).join(" ")}`;
 }
 
 /* one stat's last-5 as a fixed 5-cell grid; marked + clickable when 3-in-a-row */
@@ -2831,7 +2840,10 @@ async function loadBatterVs(batterId, pitcherId) {
 }
 
 /* one team's column: lineup of 9 hitters, then its starting pitcher block below */
-const HV_COLS = "14px minmax(40px,1fr) 34px 34px 30px 48px";   // # name AB H HR AVG
+// condensed — these 4 stat columns only need to fit 1-2 digits / a .000 avg,
+// and this whole row already has to share a narrow panel with its mirrored
+// away/home twin, so keep them tight rather than let them bleed past the edge
+const HV_COLS = "minmax(40px,1fr) 24px 20px 20px 38px";   // name AB H HR AVG
 function TeamPanel({ lineup, oppName, pitcherName, pitcherId, era, battingLine, onStat, oppPitcherName, oppPitcherId, oppTeamId, date, showBoxPitching, boxPitchers, col }) {
   const canVs = !!oppPitcherId && !!oppPitcherName;
   // the manually-added "bulk pitcher" (see AddPitcherBlock) is controlled
@@ -2965,16 +2977,16 @@ function TeamPanel({ lineup, oppName, pitcherName, pitcherId, era, battingLine, 
           <div style={{ display:"grid", gridTemplateColumns:ROW_COLS, gap:6, padding:"2px 10px",
             fontFamily:MONO, fontSize:9, letterSpacing:"0.04em", textTransform:"uppercase",
             color:C.ruleDark, alignItems:"center" }}>
-            <span>#</span><span>Hitter</span><span style={{ textAlign:"right" }}>AVG</span>
+            <span>Hitter</span><span style={{ textAlign:"right" }}>AVG</span>
             <span style={{ textAlign:"center" }}>H</span>{SEP}
             <span style={{ textAlign:"center" }}>TB</span>{SEP}
             <span style={{ textAlign:"center" }}>HRR</span>
           </div>
         ) : (
-          <div style={{ display:"grid", gridTemplateColumns:HV_COLS, gap:6, padding:"2px 10px",
+          <div style={{ display:"grid", gridTemplateColumns:HV_COLS, gap:4, padding:"2px 10px",
             fontFamily:MONO, fontSize:9, letterSpacing:"0.04em", textTransform:"uppercase",
             color:C.ruleDark, alignItems:"center" }}>
-            <span>#</span><span>Hitter</span>
+            <span>Hitter</span>
             <span style={{ textAlign:"right" }}>AB</span><span style={{ textAlign:"right" }}>H</span>
             <span style={{ textAlign:"right" }}>HR</span><span style={{ textAlign:"right" }}>AVG</span>
           </div>
@@ -2990,11 +3002,13 @@ function TeamPanel({ lineup, oppName, pitcherName, pitcherId, era, battingLine, 
             return (
             <div key={p.id} style={{ display:"grid", gridTemplateColumns:ROW_COLS, gap:6,
               padding:"3px 10px", alignItems:"center", borderTop:`1px solid #EEF0F2` }}>
-              <span style={{ fontFamily:MONO, fontSize:11, color:C.ruleDark }}>{p.order}</span>
               <span style={{ fontFamily:SANS, fontSize:12.5, whiteSpace:"nowrap",
                 overflow:"hidden", textOverflow:"ellipsis",
                 background: hot ? "rgba(255,233,77,0.5)" : "transparent", borderRadius:1 }}
-                title={p.name}>{p.name}</span>
+                title={p.name}>
+                <span className="ts-hitter-full">{p.name}</span>
+                <span className="ts-hitter-abbr">{abbrevName(p.name)}</span>
+              </span>
               <span style={{ fontFamily:MONO, fontSize:11, color:C.inkSoft, textAlign:"right" }}>{p.avg || "—"}</span>
               <SeqBlock arr={p.h} label="hits" onPick={onStat && (()=>onStat(p.name,"hits"))} />{SEP}
               <SeqBlock arr={p.tb} label="total bases" onPick={onStat && (()=>onStat(p.name,"totalBases"))} />{SEP}
@@ -3005,25 +3019,27 @@ function TeamPanel({ lineup, oppName, pitcherName, pitcherId, era, battingLine, 
           // vs-pitcher view (either the opposing starter, or the added bulk pitcher)
           const st = activeVsData[p.id];
           return (
-          <div key={p.id} style={{ display:"grid", gridTemplateColumns:HV_COLS, gap:6,
+          <div key={p.id} style={{ display:"grid", gridTemplateColumns:HV_COLS, gap:4,
             padding:"3px 10px", alignItems:"center", borderTop:`1px solid #EEF0F2` }}>
-            <span style={{ fontFamily:MONO, fontSize:11, color:C.ruleDark }}>{p.order}</span>
             <span style={{ fontFamily:SANS, fontSize:12.5, whiteSpace:"nowrap",
-              overflow:"hidden", textOverflow:"ellipsis" }} title={p.name}>{p.name}</span>
+              overflow:"hidden", textOverflow:"ellipsis" }} title={p.name}>
+              <span className="ts-hitter-full">{p.name}</span>
+              <span className="ts-hitter-abbr">{abbrevName(p.name)}</span>
+            </span>
             {activeVsLoading && !st ? (
-              <span style={{ gridColumn:"3 / span 4", fontFamily:MONO, fontSize:10,
+              <span style={{ gridColumn:"2 / span 4", fontFamily:MONO, fontSize:10,
                 color:C.ruleDark, textAlign:"right" }}>…</span>
             ) : !st || Number(st.atBats)===0 ? (
-              <span style={{ gridColumn:"3 / span 4", fontFamily:MONO, fontSize:10,
+              <span style={{ gridColumn:"2 / span 4", fontFamily:MONO, fontSize:10,
                 color:C.ruleDark, textAlign:"right" }}>no history</span>
             ) : (
               <>
-                <span style={{ fontFamily:MONO, fontSize:12, textAlign:"right", color:C.ink }}>{st.atBats}</span>
-                <span style={{ fontFamily:MONO, fontSize:12, textAlign:"right",
+                <span style={{ fontFamily:MONO, fontSize:11, textAlign:"right", color:C.ink }}>{st.atBats}</span>
+                <span style={{ fontFamily:MONO, fontSize:11, textAlign:"right",
                   color: Number(st.hits)>0?C.over:C.ink }}>{st.hits}</span>
-                <span style={{ fontFamily:MONO, fontSize:12, textAlign:"right",
+                <span style={{ fontFamily:MONO, fontSize:11, textAlign:"right",
                   color: Number(st.homeRuns)>0?C.over:C.ink }}>{st.homeRuns}</span>
-                <span style={{ fontFamily:MONO, fontSize:12, textAlign:"right", fontWeight:700,
+                <span style={{ fontFamily:MONO, fontSize:11, textAlign:"right", fontWeight:700,
                   color: (parseFloat(st.avg)||0) < 0.200 ? C.under
                        : (parseFloat(st.avg)||0) > 0.250 ? C.over : C.ink }}>{st.avg}</span>
               </>
@@ -3574,6 +3590,7 @@ html, body { margin:0; padding:0; background:${C.paper}; overscroll-behavior-y:n
   calc(60px + env(safe-area-inset-bottom)) calc(18px + env(safe-area-inset-left)); }
 .ts-cell { box-sizing:border-box; }
 .ts-pitcher-head-narrow { display:none; }
+.ts-hitter-abbr { display:none; }
 @media (max-width:760px){
   .ts-cal { grid-auto-flow:column; grid-auto-columns:89%; grid-template-columns:none;
             overflow-x:auto; scroll-snap-type:x mandatory; scroll-padding-left:0; }
@@ -3589,6 +3606,10 @@ html, body { margin:0; padding:0; background:${C.paper}; overscroll-behavior-y:n
      the wide single-row layout gets cramped once the column is this narrow */
   .ts-pitcher-head-wide { display:none !important; }
   .ts-pitcher-head-narrow { display:block; }
+  /* lineup rows: first initial + last name only, so the row has room left
+     for the AB/H/HR/AVG (or hits/TB/HRR) columns beside it */
+  .ts-hitter-full { display:none; }
+  .ts-hitter-abbr { display:inline; }
 }
 * { -webkit-tap-highlight-color: transparent; }
 `;
