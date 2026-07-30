@@ -632,6 +632,8 @@ function TravelTrends({ tags, setTag, onReady }) {
   const [formerTeams, setFormerTeams] = useState({});  // pitcherId -> Set(team ids played for across 2+ seasons)
   const [runsMap, setRunsMap] = useState({});  // teamId -> { date -> runs scored }
   const [hitsMap, setHitsMap] = useState({});  // teamId -> { date -> hits }
+  const [oppMap, setOppMap] = useState({});    // teamId -> { date -> opponent teamId } — who each
+                                                // last-5 batting-line entry was actually played against
   const [battingScoreMap, setBattingScoreMap] = useState({});  // teamId -> { date -> 0-10 score }
   const [scheduleMap, setScheduleMap] = useState({});  // teamId -> [{date, oppPid}] sorted ascending
   const [modal, setModal] = useState(null);    // { date, g, t } of clicked game
@@ -657,7 +659,7 @@ function TravelTrends({ tags, setTag, onReady }) {
     // cleared here) so a manual refresh doesn't unmount the scroll
     // container and reset which day is in view
     setErr("");
-    if (needIndicators) { setEchoes(null); setComebacks(null); setFaced({}); setFormerTeams({}); setRunsMap({}); setHitsMap({}); setBattingScoreMap({}); setScheduleMap({}); battingLineFetchedRef.current = new Set(); }
+    if (needIndicators) { setEchoes(null); setComebacks(null); setFaced({}); setFormerTeams({}); setRunsMap({}); setHitsMap({}); setOppMap({}); setBattingScoreMap({}); setScheduleMap({}); battingLineFetchedRef.current = new Set(); }
     setBusy(true);
     try {
       /* ── window schedule (travel + next-game lookup + probable pitchers) ──
@@ -850,6 +852,8 @@ function TravelTrends({ tags, setTag, onReady }) {
       const teamName = {};
       const runsByDate = {};   // teamId -> { gameTime -> runs scored }
       const hitsByDate = {};   // teamId -> { gameTime -> hits }
+      const oppByDate = {};    // teamId -> { gameTime -> opponent teamId } — who was
+                               // actually played that game, for the last-5 abbreviation label
       const gamePkByDate = {}; // teamId -> { gameTime -> { gamePk, side } } — which
                                // specific game fed that entry, and which side this
                                // team batted from (used below to look up the
@@ -876,6 +880,8 @@ function TravelTrends({ tags, setTag, onReady }) {
             const hm = hitsByDate[t.team.id] = hitsByDate[t.team.id]||{};
             hm[g.gameDate] = hits;
             (gamePkByDate[t.team.id] = gamePkByDate[t.team.id]||{})[g.gameDate] = { gamePk:g.gamePk, side };
+            const oppId = g.teams[side==="home"?"away":"home"].team.id;
+            (oppByDate[t.team.id] = oppByDate[t.team.id]||{})[g.gameDate] = oppId;
           }
         });
       });
@@ -904,6 +910,7 @@ function TravelTrends({ tags, setTag, onReady }) {
       // finishes.
       setRunsMap(runsByDate);
       setHitsMap(hitsByDate);
+      setOppMap(oppByDate);
       const echoList = [];
       Object.entries(byTeamRes).forEach(([tid, res])=>{
         const sig = detectStreakBreak(res, Number(minStreak)||10);
@@ -1341,7 +1348,7 @@ function TravelTrends({ tags, setTag, onReady }) {
     // be Final well before its late leg's own scheduled time arrives, and
     // the late leg is still that team's own "next game up" despite that.
     const hitsLine = (tid) => {
-      const empty = [null,null,null,null,null].map(()=>({ score:null, hits:null }));
+      const empty = [null,null,null,null,null].map(()=>({ score:null, hits:null, opp:null }));
       if (!g.isFinal && !g.isLive) {
         const sched = scheduleMap[tid];
         const nextUp = sched && sched.find(s => !s.isFinal);
@@ -1350,10 +1357,11 @@ function TravelTrends({ tags, setTag, onReady }) {
       const m = hitsMap[tid];
       if (!m) return empty;
       const scores = battingScoreMap[tid] || {};
+      const opps = oppMap[tid] || {};
       const priorTimes = Object.keys(m).filter(t => t < g.time).sort().reverse();
       const at = (i) => priorTimes[i]!=null
-        ? { score: scores[priorTimes[i]] ?? null, hits: m[priorTimes[i]] ?? null }
-        : { score:null, hits:null };
+        ? { score: scores[priorTimes[i]] ?? null, hits: m[priorTimes[i]] ?? null, opp: opps[priorTimes[i]] ?? null }
+        : { score:null, hits:null, opp:null };
       return [at(4), at(3), at(2), at(1), at(0)];
     };
 
@@ -1557,7 +1565,9 @@ function EraNum({ era, verdict, dark }) {
 function BattingScoreCell({ score, size, emphasize }) {
   const has = score != null;
   const bg = has && score>=7.0 ? C.softOver : has && score<=3.0 ? C.softUnder : "transparent";
-  const color = has ? (emphasize ? C.ink : C.ruleDark) : C.ruleDark;
+  // always solid black (well, near-black ink) when there's a real number —
+  // legibility matters more here than dimming older games via color.
+  const color = has ? C.ink : C.ruleDark;
   // "10.0" (the one 4-char case, at the very top of the scale) doesn't fit
   // this cell at this font size even with the dot tightened up — drop the
   // decimal just for that ceiling value rather than widen the cell.
@@ -1575,8 +1585,21 @@ function BattingScoreCell({ score, size, emphasize }) {
 function BattingHitsCell({ hits, size }) {
   return (
     <span title="Hits that game" style={{ flex:1, minWidth:0, textAlign:"center", whiteSpace:"nowrap",
-      fontFamily:MONO, fontSize:size, color:C.ruleDark }}>
+      fontFamily:MONO, fontSize:size, color: hits!=null ? C.ink : C.ruleDark }}>
       {hits!=null ? hits : "–"}
+    </span>
+  );
+}
+// the opponent that particular game was played against, 3-letter abbreviation
+// — one fixed small size across all 5 slots (unlike the score/hits rows,
+// this is a label, not tiered data, so it doesn't need to step up in size).
+function BattingOppCell({ oppId }) {
+  const abbr = oppId!=null ? (TEAM_ABBR[oppId] || "") : "";
+  return (
+    <span title={abbr ? `vs ${abbr}` : undefined} style={{ flex:1, minWidth:0, textAlign:"center",
+      whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis",
+      fontFamily:MONO, fontSize:8, letterSpacing:"0.03em", color:C.ruleDark }}>
+      {abbr || " "}
     </span>
   );
 }
@@ -1584,15 +1607,18 @@ function BattingHitsCell({ hits, size }) {
 // most recent largest — applied to both the score and the hits row.
 const BAT5_SCORE_SIZES = [9, 9, 10.5, 10.5, 13];
 const BAT5_HITS_SIZES  = [7, 7, 7.5, 7.5, 9];
-/* one team's last 5 games — a score row and a hits row, oldest to newest —
-   shown underneath its starting-pitcher box and above its lineup.
-   alignItems:"baseline" on each row is what actually keeps every slot
-   level despite their different font sizes — differently-sized inline
-   text still shares one baseline, unlike stacking whole differently-tall
-   boxes and aligning their edges. */
+/* one team's last 5 games — an opponent-abbreviation row, a score row, and a
+   hits row, oldest to newest — shown underneath its starting-pitcher box and
+   above its lineup. alignItems:"baseline" on the score/hits rows is what
+   actually keeps every slot level despite their different font sizes —
+   differently-sized inline text still shares one baseline, unlike stacking
+   whole differently-tall boxes and aligning their edges. */
 function BattingFive({ games }) {
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:2 }}>
+      <div style={{ display:"flex", gap:3 }}>
+        {games.map((gm,i) => <BattingOppCell key={i} oppId={gm.opp} />)}
+      </div>
       <div style={{ display:"flex", alignItems:"baseline", gap:3 }}>
         {games.map((gm,i) => <BattingScoreCell key={i} score={gm.score}
           size={BAT5_SCORE_SIZES[i]} emphasize={i===games.length-1} />)}
@@ -2806,7 +2832,7 @@ async function loadBatterVs(batterId, pitcherId) {
 
 /* one team's column: lineup of 9 hitters, then its starting pitcher block below */
 const HV_COLS = "14px minmax(40px,1fr) 34px 34px 30px 48px";   // # name AB H HR AVG
-function TeamPanel({ lineup, oppName, pitcherName, pitcherId, era, battingLine, onStat, oppPitcherName, oppPitcherId, oppTeamId, date, showBoxPitching, boxPitchers }) {
+function TeamPanel({ lineup, oppName, pitcherName, pitcherId, era, battingLine, onStat, oppPitcherName, oppPitcherId, oppTeamId, date, showBoxPitching, boxPitchers, col }) {
   const canVs = !!oppPitcherId && !!oppPitcherName;
   // the manually-added "bulk pitcher" (see AddPitcherBlock) is controlled
   // here, not inside that component, so it can also unlock its own
@@ -2874,8 +2900,14 @@ function TeamPanel({ lineup, oppName, pitcherName, pitcherId, era, battingLine, 
         borderRadius:2 }}>{label}</button>
   );
 
+  // each of the 3 sections below is placed as its own item in the shared
+  // away/home grid (see .ts-lineups) rather than nested inside one tall
+  // column div — that's what keeps, say, the batting-five row level between
+  // the two sides even when one side's pitcher box is taller than the
+  // other's (e.g. it has vs-team history rows the other side doesn't).
   return (
-    <div className="ts-lineup-col" style={{ minWidth:0 }}>
+    <>
+    <div className="ts-lineup-col" style={{ minWidth:0, gridColumn:col, gridRow:1 }}>
       {/* starting pitcher (upcoming games) or the full game's pitching line
           (live/finished games) — shown above the lineup. Always dark,
           matching the calendar's own dark card shade, in both states. */}
@@ -2904,10 +2936,18 @@ function TeamPanel({ lineup, oppName, pitcherName, pitcherId, era, battingLine, 
           </>
         )}
       </div>
+    </div>
 
-      {/* last 5 games' batting score + actual hits, above the lineup */}
-      {battingLine && <div style={{ margin:"0 10px 8px" }}><BattingFive games={battingLine} /></div>}
+    {/* last 5 games' batting score + actual hits, above the lineup — its own
+        grid row so it lines up with the other side's regardless of how tall
+        either side's pitcher box above it happens to be. */}
+    {battingLine && (
+      <div style={{ minWidth:0, gridColumn:col, gridRow:2, margin:"0 10px 8px" }}>
+        <BattingFive games={battingLine} />
+      </div>
+    )}
 
+    <div style={{ minWidth:0, gridColumn:col, gridRow:3 }}>
       {/* view toggle — a confirmed/pending badge for the batting lineup
           sits before the tabs themselves */}
       <div style={{ display:"flex", alignItems:"center", gap:3, padding:"6px 10px 2px", borderBottom:`1px solid #EEF0F2` }}>
@@ -2996,6 +3036,7 @@ function TeamPanel({ lineup, oppName, pitcherName, pitcherId, era, battingLine, 
             No probable starter posted for {oppName} yet.</div>)}
       </div>
     </div>
+    </>
   );
 }
 
@@ -3442,24 +3483,27 @@ function GameModal({ m, tags, setTag, now, onClose, ensureBattingLine }) {
             lined up with the columns below */}
         {t && <TrendIndicatorRow t={t} awayId={g.awayId} homeId={g.homeId} />}
 
-        {/* ── lineups: away left, home right (stays side-by-side on mobile) ── */}
+        {/* ── lineups: away left, home right (stays side-by-side on mobile) ──
+            each team's pitcher-box / batting-five / lineup are 3 separate
+            grid rows shared across both columns (see TeamPanel), so a taller
+            pitcher box on one side never pushes that side's batting-five or
+            lineup out of line with the other side's. */}
         <div className="ts-lineups" style={{ gap:0 }}>
-          <TeamPanel oppName={g.homeName}
+          <TeamPanel oppName={g.homeName} col={1}
             lineup={awayLU} pitcherName={g.awayPname} pitcherId={g.awayPid}
             oppPitcherName={g.homePname} oppPitcherId={g.homePid}
             oppTeamId={g.homeId} date={date} era={t ? t.pitcherEra(g.awayId) : null}
             battingLine={t ? t.hitsLine(g.awayId) : null}
             showBoxPitching={showBoxPitching} boxPitchers={boxPitching?.away}
             onStat={(name,stat)=>setPick({ name, stat, ts:Date.now() })} />
-          <div style={{ borderLeft:`1px solid ${C.rule}` }} className="ts-h2h-divider">
-            <TeamPanel oppName={g.awayName}
-              lineup={homeLU} pitcherName={g.homePname} pitcherId={g.homePid}
-              oppPitcherName={g.awayPname} oppPitcherId={g.awayPid}
-              oppTeamId={g.awayId} date={date} era={t ? t.pitcherEra(g.homeId) : null}
-              battingLine={t ? t.hitsLine(g.homeId) : null}
-              showBoxPitching={showBoxPitching} boxPitchers={boxPitching?.home}
-              onStat={(name,stat)=>setPick({ name, stat, ts:Date.now() })} />
-          </div>
+          <div style={{ gridColumn:2, gridRow:"1 / span 3", background:C.rule }} />
+          <TeamPanel oppName={g.awayName} col={3}
+            lineup={homeLU} pitcherName={g.homePname} pitcherId={g.homePid}
+            oppPitcherName={g.awayPname} oppPitcherId={g.awayPid}
+            oppTeamId={g.awayId} date={date} era={t ? t.pitcherEra(g.homeId) : null}
+            battingLine={t ? t.hitsLine(g.homeId) : null}
+            showBoxPitching={showBoxPitching} boxPitchers={boxPitching?.home}
+            onStat={(name,stat)=>setPick({ name, stat, ts:Date.now() })} />
         </div>
 
         {/* ── H2H OVERVIEW (bottom) — tap to expand the past meetings ── */}
@@ -3525,7 +3569,7 @@ html, body { margin:0; padding:0; background:${C.paper}; overscroll-behavior-y:n
 @keyframes ts-spin { to { transform: rotate(360deg); } }
 .ts-cal { display:grid; grid-template-columns: repeat(7, minmax(340px,1fr)); overflow-x:auto; }
 .ts-cal-col { min-width:340px; }
-.ts-lineups { display:grid; grid-template-columns:1fr 1fr; }
+.ts-lineups { display:grid; grid-template-columns:1fr 1px 1fr; }
 .ts-app { padding:calc(28px + env(safe-area-inset-top)) calc(18px + env(safe-area-inset-right))
   calc(60px + env(safe-area-inset-bottom)) calc(18px + env(safe-area-inset-left)); }
 .ts-cell { box-sizing:border-box; }
