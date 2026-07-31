@@ -1462,6 +1462,7 @@ function TravelTrends({ tags, setTag, onReady }) {
       rematchVerdict:(tid)=>rematchVerdict[tid] || null,
       pitcherEra,
       bigDayStreak,
+      shutoutStreak,
       hitsLine };
   };
 
@@ -1938,10 +1939,12 @@ function StatsRow({ tid, t, dark }) {
           const kind = slot.key==="bigday" ? t.bigDayKind(tid) : null;
           const s = slot.key==="bigday" ? bigDaySlotFor(kind) : slot;
           const present = t.keysFor(tid).has(slot.key);
-          // Shutout always shows "!" (it only ever qualifies for a notable
-          // reason to begin with — see the shutout push condition); Big Day
-          // only earns it on a real back-to-back 10+ run streak.
-          const inner = slot.key!=="bigday" ? null : kind==="zero" ? "!" : t.bigDayStreak(tid) ? "!" : null;
+          // Shutout only earns "!" on a real 2+ game shutout streak, same as
+          // Big Day earning it on a 2+ game 10-run streak — a single shutout
+          // against a good pitcher today just lights the box plainly.
+          const inner = slot.key!=="bigday" ? null
+            : kind==="zero" ? (t.shutoutStreak(tid) ? "!" : null)
+            : t.bigDayStreak(tid) ? "!" : null;
           return <TrendBox key={slot.key} present={present} color={s.color} inner={inner}
             title={present ? s.label : undefined} dark={dark} />;
         })}
