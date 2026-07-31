@@ -36,6 +36,8 @@ const C = {
   echo:"#FF8C1A",          /* neon orange: momentum wave */
   gauntlet:"#0FF0FC",      /* neon cyan: a brutal stretch of ace pitching, just survived */
   revenge:"#8B5CF6",       /* neon violet: pitcher facing a team he used to play for */
+  shutout:"#1F51FF",       /* neon blue: got blanked, 0 runs last game — shares the Big
+                               Day box (opposite extreme, same slot) rather than its own */
 };
 const MONO = "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
 const SANS = "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif";
@@ -1098,11 +1100,18 @@ function TravelTrends({ tags, setTag, onReady }) {
         } catch { /* fall back to league-average below */ }
       });
       const newScores = {};   // tid -> { time -> score }
+      // a team whose box score wasn't ready yet for one of its last 5 games
+      // (the box score for a game that *just* went final can lag behind the
+      // linescore hit count — which is why that game's HITS number already
+      // shows while its SCORE doesn't) — tracked so that one gap doesn't
+      // permanently blacklist the whole team's batting line for the rest of
+      // the session; see battingLineFetchedRef handling below.
+      const incomplete = new Set();
       need.forEach(tid => {
         perTeamGames[tid].forEach(({ gamePk, time, side }) => {
           const bx = boxCache[gamePk];
           const pitchers = bx?.[side==="home"?"away":"home"];
-          if (!pitchers || !pitchers.length) return;
+          if (!pitchers || !pitchers.length) { incomplete.add(tid); return; }
           let actual = 0, expected = 0;
           pitchers.forEach(p=>{
             const trueIP = ipToOuts(p.stat?.inningsPitched)/3;
@@ -1112,6 +1121,7 @@ function TravelTrends({ tags, setTag, onReady }) {
           });
           const score = qualityScore(actual, expected);
           if (score!=null) (newScores[tid] = newScores[tid]||{})[time] = score;
+          else incomplete.add(tid);
         });
       });
       setBattingScoreMap(prev => {
@@ -1119,6 +1129,9 @@ function TravelTrends({ tags, setTag, onReady }) {
         Object.entries(newScores).forEach(([tid, byTime]) => { next[tid] = { ...next[tid], ...byTime }; });
         return next;
       });
+      // let a still-incomplete team retry the next time its modal opens,
+      // rather than being marked "fetched" forever after this one partial pass
+      incomplete.forEach(tid => battingLineFetchedRef.current.delete(tid));
     } catch {
       // a failed lazy fetch just leaves those teams' batting line blank —
       // let the viewer retry by reopening the modal, rather than looping
@@ -1328,6 +1341,15 @@ function TravelTrends({ tags, setTag, onReady }) {
     if (aRuns>=10) bigday.push({ teamId:g.awayId, team:g.awayName, runs:aRuns });
     if (hRuns>=10) bigday.push({ teamId:g.homeId, team:g.homeName, runs:hRuns });
 
+    // the opposite extreme — got shut out last time out. A team can never
+    // be both in the same game, so this shares the Big Day box (same slot,
+    // just a different color) instead of needing a slot of its own.
+    const shutout = [];
+    if (aRuns===0) shutout.push({ teamId:g.awayId, team:g.awayName });
+    if (hRuns===0) shutout.push({ teamId:g.homeId, team:g.homeName });
+    const bigDayKind = (tid) =>
+      bigday.some(b=>b.teamId===tid) ? "big" : shutout.some(s=>s.teamId===tid) ? "zero" : null;
+
     // did this team score 10+ runs in each of the two games immediately
     // before this one (same strict adjacency as above, not just "the last
     // two completed games found anywhere")?
@@ -1381,12 +1403,14 @@ function TravelTrends({ tags, setTag, onReady }) {
     echo.forEach(e=>add(e.teamId, "echo"));
     cb.forEach(c=>add(c.teamId, "late"));
     bigday.forEach(b=>add(b.teamId, "bigday"));
+    shutout.forEach(s=>add(s.teamId, "bigday"));
     gauntlet.forEach(x=>add(x.teamId, "gauntlet"));
     formerTeam.forEach(x=>add(x.teamId, "formerTeam"));
 
-    const any = !!g.flagged || echo.length>0 || cb.length>0 || rematch.length>0 || bigday.length>0 || gauntlet.length>0 || formerTeam.length>0;
-    return { travel:!!g.flagged, travelers:g.travelers||[], echo, cb, rematch, bigday, gauntlet, formerTeam, any,
+    const any = !!g.flagged || echo.length>0 || cb.length>0 || rematch.length>0 || bigday.length>0 || shutout.length>0 || gauntlet.length>0 || formerTeam.length>0;
+    return { travel:!!g.flagged, travelers:g.travelers||[], echo, cb, rematch, bigday, shutout, gauntlet, formerTeam, any,
       keysFor:(tid)=>sideKeys[tid] || new Set(),
+      bigDayKind,
       rematchTier:(tid)=>rematchTier[tid] || null,
       rematchVerdict:(tid)=>rematchVerdict[tid] || null,
       pitcherEra,
@@ -1471,8 +1495,8 @@ function TravelTrends({ tags, setTag, onReady }) {
 function Legend() {
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:6, marginBottom:10 }}>
-      {TREND_SLOTS.map(s=>(
-        <div key={s.key} style={{ display:"flex", alignItems:"flex-start", gap:6, width:"100%" }}>
+      {LEGEND_ROWS.map((s,i)=>(
+        <div key={s.key+i} style={{ display:"flex", alignItems:"flex-start", gap:6, width:"100%" }}>
           <span style={{ width:13, height:9, borderRadius:2, background:s.color,
             flexShrink:0, marginTop:3 }} />
           <span style={{ display:"flex", flexDirection:"column", lineHeight:1.25, minWidth:0 }}>
@@ -1519,6 +1543,23 @@ const TREND_SLOTS = [
 // the header row so the time/FINAL label's own right edge lines up with
 // the trend boxes' right edge one row below.
 const TRENDS_W = BOX_W*TREND_SLOTS.length + BOX_GAP*(TREND_SLOTS.length-1);
+
+// shutout ("blanked, 0 runs last game") shares the Big Day box rather than
+// getting a slot of its own — a team can never be both in the same game, so
+// the one box just lights up a different color depending on which extreme
+// happened. This swaps in that color/label wherever the "bigday" slot is
+// about to render for a team whose last game was the zero-run kind.
+const bigDaySlotFor = (kind) => kind==="zero"
+  ? { key:"bigday", color:C.shutout, label:"Shutout", shortLabel:"Shutout",
+      desc:"Scored 0 runs in their last game" }
+  : TREND_SLOTS.find(s=>s.key==="bigday");
+// legend-only entry — the calendar/modal indicator grid stays the same 6
+// boxes (see TRENDS_W above); this is just an extra row in the legend list
+// so "what does the blue box mean" has an answer.
+const SHUTOUT_LEGEND_ENTRY = bigDaySlotFor("zero");
+// Big Day, then its opposite-extreme twin Shutout right after it (same box,
+// see bigDaySlotFor above), then the rest of the slots in their normal order.
+const LEGEND_ROWS = [TREND_SLOTS[0], SHUTOUT_LEGEND_ENTRY, ...TREND_SLOTS.slice(1)];
 
 /* a monospace font gives "." the same full character-cell width as a digit,
    which visibly wastes room in these small fixed-width number boxes (badly
@@ -1685,9 +1726,13 @@ function TrendChip({ slot, present }) {
 function TrendIndicatorRow({ t, awayId, homeId }) {
   const half = (tid) => {
     const keys = t.keysFor(tid);
+    const kind = t.bigDayKind(tid);
     return (
       <div style={{ display:"flex", gap:3, flex:1, minWidth:0 }}>
-        {TREND_SLOTS.map(slot => <TrendChip key={slot.key} slot={slot} present={keys.has(slot.key)} />)}
+        {TREND_SLOTS.map(slot => {
+          const s = slot.key==="bigday" ? bigDaySlotFor(kind) : slot;
+          return <TrendChip key={slot.key} slot={s} present={keys.has(slot.key)} />;
+        })}
       </div>
     );
   };
@@ -1834,10 +1879,11 @@ function StatsRow({ tid, t, dark }) {
       <span style={{ width:7, flexShrink:0 }} />
       <div style={{ display:"flex", alignItems:"center", gap:BOX_GAP }}>
         {TREND_SLOTS.map(slot=>{
+          const s = slot.key==="bigday" ? bigDaySlotFor(t.bigDayKind(tid)) : slot;
           const present = t.keysFor(tid).has(slot.key);
           const inner = slot.key==="bigday" && t.bigDayStreak(tid) ? "!" : null;
-          return <TrendBox key={slot.key} present={present} color={slot.color} inner={inner}
-            title={present ? slot.label : undefined} dark={dark} />;
+          return <TrendBox key={slot.key} present={present} color={s.color} inner={inner}
+            title={present ? s.label : undefined} dark={dark} />;
         })}
       </div>
     </div>
