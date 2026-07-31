@@ -1547,11 +1547,16 @@ function Legend() {
           <span style={{ width:13, height:9, borderRadius:2, background:s.color,
             flexShrink:0, marginTop:3 }} />
           <span style={{ display:"flex", flexDirection:"column", lineHeight:1.25, minWidth:0 }}>
-            <span style={{ fontFamily:MONO, fontSize:10, fontWeight:700, color:C.ink }}>{s.label}</span>
+            <span style={{ fontFamily:MONO, fontSize:10, fontWeight:700, color:C.ink }}>
+              {s.label}{s.yesterday && "*"}</span>
             <span style={{ fontFamily:SANS, fontSize:10.5, color:C.inkSoft }}>{s.desc}</span>
           </span>
         </div>
       ))}
+      <div style={{ fontFamily:SANS, fontSize:10, color:C.ruleDark, marginTop:2 }}>
+        * Void if the team had an off day yesterday — these are all specifically
+        claims about yesterday's game, so there's nothing for them to point at.
+      </div>
     </div>
   );
 }
@@ -1571,19 +1576,22 @@ const CARD_H = 58;
 // `shortLabel` is what actually renders inside a modal TrendChip — narrow
 // enough to fit without truncating. `label` stays the full name, still used
 // by the homepage legend and calendar-card tooltips, which have room for it.
+// entries marked yesterday:true are void if the team had an off day
+// yesterday (see the "*" footnote the Legend renders below the list) —
+// Gauntlet and Homecoming Jinx are the only two exempt from that gate.
 const TREND_SLOTS = [
   { key:"bigday", color:C.bigday, label:"Big Day", shortLabel:"Big Day",
-    desc:"Scored 10+ runs in their last game" },
+    desc:"Scored 10+ runs in their last game", yesterday:true },
   { key:"late",   color:C.late,   label:"Late go-ahead", shortLabel:"Late GA",
-    desc:"Team never led until the 8th inning or later yesterday" },
+    desc:"Team never led at any point — not even mid-inning — until the 8th or later, yesterday", yesterday:true },
   { key:"gauntlet", color:C.gauntlet, label:"The Gauntlet", shortLabel:"Gauntlet",
     desc:"Just faced 3+ straight starters with a sub-3.00 ERA" },
   { key:"formerTeam", color:C.revenge, label:"Homecoming Jinx", shortLabel:"Jinx",
-    desc:"Probable pitcher spent 2+ seasons on this team within the last 2 years — usually goes poorly for him" },
+    desc:"Probable pitcher spent 2+ seasons on this team, at least one within the last 2 years — usually goes poorly for him" },
   { key:"echo",   color:C.echo,   label:"Streak echo", shortLabel:"Streak",
-    desc:"Team just snapped a 10+ game win or loss streak yesterday" },
+    desc:"Team just snapped a 10+ game win or loss streak yesterday", yesterday:true },
   { key:"travel", color:C.travel, label:"B2B travel", shortLabel:"B2B",
-    desc:"West yesterday, East today on back-to-back days" },
+    desc:"West yesterday, East today on back-to-back days", yesterday:true },
 ];
 // total rendered width of the trend-box strip — a fixed constant (the slot
 // count never changes per-game), used to reserve matching blank space in
@@ -1598,7 +1606,8 @@ const TRENDS_W = BOX_W*TREND_SLOTS.length + BOX_GAP*(TREND_SLOTS.length-1);
 // about to render for a team whose last game was the zero-run kind.
 const bigDaySlotFor = (kind) => kind==="zero"
   ? { key:"bigday", color:C.shutout, label:"Shutout", shortLabel:"Shutout",
-      desc:"Scored 0 runs in their last game" }
+      desc:"Shut out last game while facing a sub-3.50 ERA pitcher today, or shut out in each of the last two games",
+      yesterday:true }
   : TREND_SLOTS.find(s=>s.key==="bigday");
 // legend-only entry — the calendar/modal indicator grid stays the same 6
 // boxes (see TRENDS_W above); this is just an extra row in the legend list
