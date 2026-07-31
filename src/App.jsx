@@ -516,18 +516,22 @@ function detectStreakBreak(results, minLen) {
 
 /* late go-ahead: winner first took the lead in the 8th inning or later.
    `ls` is an MLB linescore; winnerSide is "home"|"away". Returns
-   {firstLeadInning} or null. */
+   {firstLeadInning} or null. Checked after EACH half-inning, not just once
+   per full inning — the away team scoring in the top half puts them ahead
+   the moment that run crosses the plate, even if the home team ties it back
+   up in the bottom half of that same inning. Netting the two halves together
+   before checking would hide that brief lead entirely. */
 function detectLateComeback(ls, winnerSide) {
   const innings = ls?.innings || [];
   let homeCum = 0, awayCum = 0;
   for (const inn of innings) {
-    homeCum += Number(inn.home?.runs)||0;
-    awayCum += Number(inn.away?.runs)||0;
-    const winnerAhead = winnerSide === "home" ? homeCum > awayCum : awayCum > homeCum;
-    if (winnerAhead) {
-      const num = inn.num || 0;
+    const num = inn.num || 0;
+    awayCum += Number(inn.away?.runs)||0;   // top half: away bats first
+    if ((winnerSide === "away" ? awayCum > homeCum : homeCum > awayCum))
       return num >= 8 ? { firstLeadInning: num } : null;   // first lead must be 8th+
-    }
+    homeCum += Number(inn.home?.runs)||0;   // bottom half: home bats
+    if ((winnerSide === "home" ? homeCum > awayCum : awayCum > homeCum))
+      return num >= 8 ? { firstLeadInning: num } : null;
   }
   return null;
 }
@@ -1008,10 +1012,14 @@ function TravelTrends({ tags, setTag, onReady }) {
           facedMap[pid] = { list, season: pitcherSeasonAverages(splits) };
         } catch { /* leave unset */ }
       });
-      /* ── former team: has each probable spent 2+ separate seasons pitching
-         for the team he's facing today (a real tenure, not just a rental
-         half-season or a mid-year rental the other way) — a "revenge game,"
-         distinct from the in-season rematch above. ── */
+      /* ── former team ("Homecoming Jinx"): has each probable spent 2+
+         separate seasons pitching for the team he's facing today (a real
+         tenure, not just a rental half-season or a mid-year rental the
+         other way), with at least one of those seasons within the last two
+         years (so a tenure that ended long ago no longer counts) —
+         distinct from the in-season rematch above. Not called "revenge
+         game": facing a former team is typically a bad outing for the
+         pitcher, not a good one. ── */
       const formerTeamMap = {};
       await mapPool([...pitcherIds], 4, async (pid)=>{
         try {
@@ -1026,7 +1034,7 @@ function TravelTrends({ tags, setTag, onReady }) {
             (seasonsByTeam[tid] = seasonsByTeam[tid] || new Set()).add(s.season);
           });
           const teams = new Set(Object.entries(seasonsByTeam)
-            .filter(([,seasons])=>seasons.size>=2)
+            .filter(([,seasons])=>seasons.size>=2 && [...seasons].some(yr=>Number(yr)>=SEASON-2))
             .map(([tid])=>Number(tid)));
           formerTeamMap[pid] = teams;
         } catch { /* leave unset */ }
@@ -1268,9 +1276,10 @@ function TravelTrends({ tags, setTag, onReady }) {
     checkRematch(g.awayPid, g.awayId, g.homeId, g.awayPname, g.homeName);
     checkRematch(g.homePid, g.homeId, g.awayId, g.homePname, g.awayName);
 
-    // "revenge game": this team's probable starter previously pitched FOR
-    // the team he's facing today, at some point in his career (not just an
-    // in-season repeat matchup, which is the rematch trend above)
+    // "Homecoming Jinx": this team's probable starter previously pitched FOR
+    // the team he's facing today, recently enough and long enough to count
+    // (see formerTeamMap above) — not just an in-season repeat matchup,
+    // which is the rematch trend above.
     const formerTeam = [];
     const checkFormerTeam = (pid, teamId, oppId, pitcher, oppName) => {
       if (!pid) return;
@@ -1287,17 +1296,27 @@ function TravelTrends({ tags, setTag, onReady }) {
       const era = pid ? faced[pid]?.season?.era : null;
       return era!=null ? era : null;
     };
+    // the OTHER side's probable starter's ERA — who this team is actually
+    // about to face today (used by the Shutout indicator below to judge
+    // whether they're staring down a good pitcher).
+    const oppPitcherEra = (tid) => {
+      const pid = tid===g.awayId ? g.homePid : tid===g.homeId ? g.awayPid : null;
+      const era = pid ? faced[pid]?.season?.era : null;
+      return era!=null ? era : null;
+    };
 
-    // "the gauntlet": this team just came through a run of 2-3 straight
-    // games against a starter with a sub-3.00 ERA — looks strictly at the
-    // games BEFORE this one (today's own opposing starter doesn't count
-    // toward it), same as the other "yesterday"-style trend markers. Matches
-    // on this exact game's gamePk (not just its date) so a doubleheader's
-    // second game correctly finds its own first game as "the previous one,"
-    // rather than an ambiguous date match landing on either game. A game
-    // with no posted starter yet, or an unknown ERA, simply breaks the run
-    // there, same "actual games, not calendar days" logic as the other
-    // streaks.
+    // "the gauntlet": this team just came through a run of 3+ straight games
+    // against a starter with a sub-3.00 ERA (2 in a row doesn't count — has
+    // to be a genuine stretch) — looks strictly at the games BEFORE this one
+    // (today's own opposing starter doesn't count toward it), same as the
+    // other "yesterday"-style trend markers. Matches on this exact game's
+    // gamePk (not just its date) so a doubleheader's second game correctly
+    // finds its own first game as "the previous one," rather than an
+    // ambiguous date match landing on either game. A game with no posted
+    // starter yet, or an unknown ERA, simply breaks the run there, same
+    // "actual games, not calendar days" logic as the other streaks. Exempt
+    // from the "must have played yesterday" gate below — this is about a
+    // stretch of games, not a single most-recent one.
     const gauntlet = [];
     [[g.awayId,g.awayName],[g.homeId,g.homeName]].forEach(([tid,tname])=>{
       const sched = scheduleMap[tid];
@@ -1311,7 +1330,7 @@ function TravelTrends({ tags, setTag, onReady }) {
       };
       let runLen = 0;
       for (let i=idx-1; i>=0 && qualifies(i); i--) runLen++;
-      if (runLen>=2) gauntlet.push({ teamId:tid, team:tname, len:runLen });
+      if (runLen>=3) gauntlet.push({ teamId:tid, team:tname, len:runLen });
     });
 
     // the specific game(s) immediately before this one in the team's real
@@ -1341,12 +1360,26 @@ function TravelTrends({ tags, setTag, onReady }) {
     if (aRuns>=10) bigday.push({ teamId:g.awayId, team:g.awayName, runs:aRuns });
     if (hRuns>=10) bigday.push({ teamId:g.homeId, team:g.homeName, runs:hRuns });
 
+    // did this team score 0 runs in each of the two games immediately before
+    // this one (same strict adjacency as bigDayStreak below)?
+    const shutoutStreak = (tid) => {
+      const [prev1, prev2] = prevScheduledGames(tid, 2);
+      if (!prev1 || !prev2) return false;
+      const r1 = runsMap[tid]?.[prev1.time], r2 = runsMap[tid]?.[prev2.time];
+      return r1===0 && r2===0;
+    };
     // the opposite extreme — got shut out last time out. A team can never
     // be both in the same game, so this shares the Big Day box (same slot,
-    // just a different color) instead of needing a slot of its own.
+    // just a different color) instead of needing a slot of its own. Unlike
+    // Big Day, a single shutout only counts if they're now facing a good
+    // pitcher (sub-3.50 ERA) — a shutout against a good arm isn't much of a
+    // signal on its own; getting shut out in each of the last two games
+    // regardless of today's pitcher is the other qualifying case.
     const shutout = [];
-    if (aRuns===0) shutout.push({ teamId:g.awayId, team:g.awayName });
-    if (hRuns===0) shutout.push({ teamId:g.homeId, team:g.homeName });
+    if (aRuns===0 && ((oppPitcherEra(g.awayId)!=null && oppPitcherEra(g.awayId)<3.50) || shutoutStreak(g.awayId)))
+      shutout.push({ teamId:g.awayId, team:g.awayName });
+    if (hRuns===0 && ((oppPitcherEra(g.homeId)!=null && oppPitcherEra(g.homeId)<3.50) || shutoutStreak(g.homeId)))
+      shutout.push({ teamId:g.homeId, team:g.homeName });
     const bigDayKind = (tid) =>
       bigday.some(b=>b.teamId===tid) ? "big" : shutout.some(s=>s.teamId===tid) ? "zero" : null;
 
@@ -1396,19 +1429,33 @@ function TravelTrends({ tags, setTag, onReady }) {
       return [at(4), at(3), at(2), at(1), at(0)];
     };
 
+    // most of these indicators are specifically claims about "yesterday" —
+    // scored X runs, snapped a streak, flew cross-country overnight. If the
+    // team had an off day, there's no "yesterday" for that claim to point
+    // at, so none of them should light up. The Gauntlet (a multi-game
+    // stretch) and Homecoming Jinx (roster history) aren't about yesterday
+    // specifically, so they're exempt from this gate.
+    const yesterday = addDays(date,-1);
+    const playedYesterday = (tid) => (scheduleMap[tid]||[]).some(s=>s.date===yesterday && s.isFinal);
+    const travelersY = (g.travelers||[]).filter(x=>playedYesterday(x.teamId));
+    const echoY = echo.filter(e=>playedYesterday(e.teamId));
+    const cbY = cb.filter(c=>playedYesterday(c.teamId));
+    const bigdayY = bigday.filter(b=>playedYesterday(b.teamId));
+    const shutoutY = shutout.filter(s=>playedYesterday(s.teamId));
+
     // per-team keys for the 2x2 situational-trend grid
     const sideKeys = { [g.awayId]:new Set(), [g.homeId]:new Set() };
     const add = (tid, key) => { if (sideKeys[tid]) sideKeys[tid].add(key); };
-    (g.travelers||[]).forEach(x=>add(x.teamId, "travel"));
-    echo.forEach(e=>add(e.teamId, "echo"));
-    cb.forEach(c=>add(c.teamId, "late"));
-    bigday.forEach(b=>add(b.teamId, "bigday"));
-    shutout.forEach(s=>add(s.teamId, "bigday"));
+    travelersY.forEach(x=>add(x.teamId, "travel"));
+    echoY.forEach(e=>add(e.teamId, "echo"));
+    cbY.forEach(c=>add(c.teamId, "late"));
+    bigdayY.forEach(b=>add(b.teamId, "bigday"));
+    shutoutY.forEach(s=>add(s.teamId, "bigday"));
     gauntlet.forEach(x=>add(x.teamId, "gauntlet"));
     formerTeam.forEach(x=>add(x.teamId, "formerTeam"));
 
-    const any = !!g.flagged || echo.length>0 || cb.length>0 || rematch.length>0 || bigday.length>0 || shutout.length>0 || gauntlet.length>0 || formerTeam.length>0;
-    return { travel:!!g.flagged, travelers:g.travelers||[], echo, cb, rematch, bigday, shutout, gauntlet, formerTeam, any,
+    const any = travelersY.length>0 || echoY.length>0 || cbY.length>0 || rematch.length>0 || bigdayY.length>0 || shutoutY.length>0 || gauntlet.length>0 || formerTeam.length>0;
+    return { travel:travelersY.length>0, travelers:travelersY, echo:echoY, cb:cbY, rematch, bigday:bigdayY, shutout:shutoutY, gauntlet, formerTeam, any,
       keysFor:(tid)=>sideKeys[tid] || new Set(),
       bigDayKind,
       rematchTier:(tid)=>rematchTier[tid] || null,
@@ -1530,9 +1577,9 @@ const TREND_SLOTS = [
   { key:"late",   color:C.late,   label:"Late go-ahead", shortLabel:"Late GA",
     desc:"Team never led until the 8th inning or later yesterday" },
   { key:"gauntlet", color:C.gauntlet, label:"The Gauntlet", shortLabel:"Gauntlet",
-    desc:"Just faced 2-3 straight starters with a sub-3.00 ERA" },
-  { key:"formerTeam", color:C.revenge, label:"Revenge game", shortLabel:"Revenge",
-    desc:"Probable pitcher spent 2+ seasons on the team he's facing today" },
+    desc:"Just faced 3+ straight starters with a sub-3.00 ERA" },
+  { key:"formerTeam", color:C.revenge, label:"Homecoming Jinx", shortLabel:"Jinx",
+    desc:"Probable pitcher spent 2+ seasons on this team within the last 2 years — usually goes poorly for him" },
   { key:"echo",   color:C.echo,   label:"Streak echo", shortLabel:"Streak",
     desc:"Team just snapped a 10+ game win or loss streak yesterday" },
   { key:"travel", color:C.travel, label:"B2B travel", shortLabel:"B2B",
@@ -1879,9 +1926,13 @@ function StatsRow({ tid, t, dark }) {
       <span style={{ width:7, flexShrink:0 }} />
       <div style={{ display:"flex", alignItems:"center", gap:BOX_GAP }}>
         {TREND_SLOTS.map(slot=>{
-          const s = slot.key==="bigday" ? bigDaySlotFor(t.bigDayKind(tid)) : slot;
+          const kind = slot.key==="bigday" ? t.bigDayKind(tid) : null;
+          const s = slot.key==="bigday" ? bigDaySlotFor(kind) : slot;
           const present = t.keysFor(tid).has(slot.key);
-          const inner = slot.key==="bigday" && t.bigDayStreak(tid) ? "!" : null;
+          // Shutout always shows "!" (it only ever qualifies for a notable
+          // reason to begin with — see the shutout push condition); Big Day
+          // only earns it on a real back-to-back 10+ run streak.
+          const inner = slot.key!=="bigday" ? null : kind==="zero" ? "!" : t.bigDayStreak(tid) ? "!" : null;
           return <TrendBox key={slot.key} present={present} color={s.color} inner={inner}
             title={present ? s.label : undefined} dark={dark} />;
         })}
