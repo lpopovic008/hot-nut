@@ -286,7 +286,13 @@ function buildSdqlRows(games) {
       team: me.name, teamId: me.id, oTeam: opp.name, oTeamId: opp.id,
       site: siteName, runs: me.score, hits: me.hits, errors: me.errors,
       starter: me.starter, starterId: me.starterId,
-      innings: innings.map(i => i[key]?.runs ?? 0),
+      // key each frame off its own `num` rather than its position in the
+      // array: a linescore that skips or reorders a frame would otherwise
+      // slide every later inning down one and quietly misreport inning8
+      innings: innings.reduce((acc,fr) => {
+        if (fr?.num >= 1) acc[fr.num-1] = fr[key]?.runs ?? 0;
+        return acc;
+      }, []),
       margin: me.score - opp.score,
       win: me.score > opp.score ? 1 : 0,
       loss: me.score < opp.score ? 1 : 0,
