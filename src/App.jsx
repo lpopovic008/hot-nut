@@ -118,6 +118,120 @@ const ipToOuts = (ip) => {
   const whole = Math.floor(v), frac = Math.round((v-whole)*10);
   return whole*3 + frac;
 };
+
+/* ───────────────────────── Research zone ─────────────────────────
+   a small query engine for "if a pitcher's last start against a team
+   looked like X, how did his NEXT start against that same team go?"
+   theories — each theory is a scope (which start the filters look at,
+   currently just the one option) plus a list of metric/operator/value
+   conditions (all ANDed together), evaluated against every pitcher's
+   game log for the season. */
+// one pitching line's worth of derived rate stats, shared by both the
+// filter conditions and the results-panel aggregates below.
+function researchStartStats(split) {
+  const stat = split?.stat || {};
+  const ip = ipToOuts(stat.inningsPitched)/3;
+  const h = Number(stat.hits)||0, er = Number(stat.earnedRuns)||0,
+    bb = Number(stat.baseOnBalls)||0, k = Number(stat.strikeOuts)||0,
+    hr = Number(stat.homeRuns)||0;
+  return { ip, h, er, bb, k, hr,
+    era: ip>0 ? er*9/ip : null,
+    erip: ip>0 ? er/ip : null,
+    whip: ip>0 ? (h+bb)/ip : null };
+}
+const RESEARCH_METRICS = [
+  { key:"ip",   label:"IP" },
+  { key:"h",    label:"Hits" },
+  { key:"er",   label:"Earned runs" },
+  { key:"bb",   label:"Walks" },
+  { key:"k",    label:"Strikeouts" },
+  { key:"hr",   label:"Home runs" },
+  { key:"era",  label:"ERA (that start)" },
+  { key:"erip", label:"ER/IP" },
+  { key:"whip", label:"WHIP" },
+];
+const RESEARCH_OPERATORS = [
+  { key:">",  label:">" },
+  { key:"<",  label:"<" },
+  { key:">=", label:"≥" },
+  { key:"<=", label:"≤" },
+  { key:"=",  label:"=" },
+];
+// only one scope each for now (see the dropdowns in ResearchTab) — kept as
+// registries rather than hardcoded strings so a second option later (e.g.
+// "any start this season," "next start on the road") is just a new entry.
+const RESEARCH_SCOPES = [
+  { key:"lastVsTeam", label:"his last start against this team" },
+];
+const RESEARCH_TARGETS = [
+  { key:"nextVsTeam", label:"his next start against that same team" },
+];
+
+function researchFilterPasses(split, filters) {
+  const stats = researchStartStats(split);
+  return filters.every(f => {
+    const val = stats[f.metric];
+    if (val==null || Number.isNaN(val) || f.value==="" || f.value==null) return false;
+    const target = Number(f.value);
+    if (Number.isNaN(target)) return false;
+    switch (f.operator) {
+      case ">":  return val > target;
+      case "<":  return val < target;
+      case ">=": return val >= target;
+      case "<=": return val <= target;
+      case "=":  return Math.abs(val - target) < 1e-9;
+      default:   return true;
+    }
+  });
+}
+
+// the actual research query: every pitcher who threw a game this season,
+// grouped by opponent in chronological order, testing every consecutive
+// pair of starts vs the same team — if the first one passes every filter,
+// the second one is a matching instance. Fetches one gameLog per pitcher
+// (mapPool keeps only a handful in flight at once), so this can take a
+// while across a whole season's pitching staffs; `onProgress(done, total)`
+// lets the caller show a live counter instead of a single frozen spinner.
+async function runPitcherRematchResearch(filters, onProgress) {
+  const pr = await fetch(`${API}/sports/1/players?season=${SEASON}`);
+  if (!pr.ok) throw new Error(`players ${pr.status}`);
+  const pj = await pr.json();
+  const pitchers = (pj.people||[]).filter(p =>
+    p.primaryPosition?.code==="1" || p.primaryPosition?.abbreviation==="P");
+  const instances = [];
+  let done = 0;
+  await mapPool(pitchers, 6, async (p) => {
+    try {
+      const gr = await fetch(`${API}/people/${p.id}/stats?stats=gameLog&group=pitching&season=${SEASON}&gameType=R`);
+      if (gr.ok) {
+        const gj = await gr.json();
+        const splits = (gj.stats?.[0]?.splits||[]).slice().sort((a,b)=>a.date.localeCompare(b.date));
+        const byOpp = {};   // opponent teamId -> this pitcher's starts vs them, in order
+        splits.forEach(s => {
+          const oid = s.opponent?.id;
+          if (oid==null) return;
+          (byOpp[oid] = byOpp[oid]||[]).push(s);
+        });
+        Object.values(byOpp).forEach(starts => {
+          for (let i=0; i<starts.length-1; i++){
+            const first = starts[i], second = starts[i+1];
+            if (researchFilterPasses(first, filters)) {
+              instances.push({ pitcherId:p.id, pitcherName:p.fullName,
+                oppName: second.opponent?.name || first.opponent?.name || "—",
+                first, second,
+                firstStats: researchStartStats(first), secondStats: researchStartStats(second) });
+            }
+          }
+        });
+      }
+    } catch { /* skip this pitcher, keep going */ }
+    done++;
+    onProgress?.(done, pitchers.length);
+  });
+  instances.sort((a,b) => (b.second.date||"").localeCompare(a.second.date||""));
+  return instances;
+}
+
 // hits+walks (times on base) plus total bases (hits, plus extra credit for
 // doubles/triples/homers when present) allowed or produced in one game/
 // stint — the same OPS-flavored "combined production" figure used by both
@@ -4208,6 +4322,204 @@ function MiniDatePicker({ value, onSelect, onClose }) {
   );
 }
 
+/* ───────────────────────── Research zone ─────────────────────────
+   a Killersports-style theory builder: "when a pitcher's last start
+   against a team looked like [conditions], how did his next start
+   against them go?" — one scope, a list of ANDed metric conditions,
+   one result target, all read left-to-right as a sentence. */
+let researchFilterSeq = 0;
+const newResearchFilter = () => ({ id: ++researchFilterSeq, metric:"whip", operator:">", value:"" });
+
+const researchSelectStyle = {
+  fontFamily:MONO, fontSize:12.5, padding:"6px 8px", border:`1px solid ${C.rule}`,
+  borderRadius:2, background:"#fff", color:C.ink, cursor:"pointer",
+};
+const researchValueStyle = {
+  ...researchSelectStyle, width:76, cursor:"text", MozAppearance:"textfield",
+};
+
+function FilterRow({ filter, onChange, onRemove, showRemove }) {
+  return (
+    <div style={{ display:"flex", alignItems:"center", gap:8, flexWrap:"wrap" }}>
+      <span style={{ fontFamily:SANS, fontSize:13, color:C.inkSoft, flexShrink:0 }}>Pitcher</span>
+      <select value={filter.metric} onChange={e=>onChange({ ...filter, metric:e.target.value })}
+        style={researchSelectStyle}>
+        {RESEARCH_METRICS.map(m => <option key={m.key} value={m.key}>{m.label}</option>)}
+      </select>
+      <select value={filter.operator} onChange={e=>onChange({ ...filter, operator:e.target.value })}
+        style={{ ...researchSelectStyle, width:52, textAlign:"center" }}>
+        {RESEARCH_OPERATORS.map(o => <option key={o.key} value={o.key}>{o.label}</option>)}
+      </select>
+      <input type="number" step="0.01" inputMode="decimal" value={filter.value} placeholder="value"
+        onChange={e=>onChange({ ...filter, value:e.target.value })}
+        style={researchValueStyle} />
+      {showRemove && (
+        <button onClick={onRemove} title="Remove this condition" aria-label="Remove condition"
+          style={{ border:"none", background:"transparent", color:C.ruleDark, cursor:"pointer",
+            fontFamily:MONO, fontSize:15, padding:"2px 4px", flexShrink:0 }}>✕</button>
+      )}
+    </div>
+  );
+}
+
+// one row of the aggregate summary — label left, value right, monospaced
+// so a column of these lines up like a scorecard.
+function StatLine({ label, value }) {
+  return (
+    <div style={{ display:"flex", justifyContent:"space-between", gap:12, padding:"3px 0" }}>
+      <span style={{ fontFamily:SANS, fontSize:12.5, color:C.inkSoft }}>{label}</span>
+      <span style={{ fontFamily:MONO, fontSize:12.5, fontWeight:700, color:C.ink }}>{value}</span>
+    </div>
+  );
+}
+
+const avgOf = (arr, fn) => {
+  const vals = arr.map(fn).filter(v => v!=null && !Number.isNaN(v));
+  return vals.length ? vals.reduce((a,b)=>a+b, 0) / vals.length : null;
+};
+const fmt = (v, d=2) => v==null ? "–" : v.toFixed(d);
+
+function ResearchResults({ instances }) {
+  if (!instances) return null;
+  if (!instances.length) {
+    return (
+      <div style={{ padding:"14px 16px", background:C.card, border:`1px solid ${C.rule}`,
+        borderRadius:3, fontFamily:SANS, fontSize:13, color:C.inkSoft }}>
+        No matching instances this season — try loosening a condition.
+      </div>
+    );
+  }
+  const secondStats = instances.map(i => i.secondStats);
+  return (
+    <div>
+      <div style={{ display:"flex", flexDirection:"column", gap:2, padding:"12px 16px",
+        background:C.card, border:`1px solid ${C.rule}`, borderRadius:3, marginBottom:14 }}>
+        <div style={{ fontFamily:MONO, fontSize:11, letterSpacing:"0.1em", textTransform:"uppercase",
+          color:C.ruleDark, marginBottom:4 }}>
+          {instances.length} matching instance{instances.length===1?"":"s"} — next-start averages
+        </div>
+        <StatLine label="ERA" value={fmt(avgOf(secondStats, s=>s.era))} />
+        <StatLine label="WHIP" value={fmt(avgOf(secondStats, s=>s.whip))} />
+        <StatLine label="ER/IP" value={fmt(avgOf(secondStats, s=>s.erip))} />
+        <StatLine label="IP" value={fmt(avgOf(secondStats, s=>s.ip), 1)} />
+        <StatLine label="H" value={fmt(avgOf(secondStats, s=>s.h), 1)} />
+        <StatLine label="BB" value={fmt(avgOf(secondStats, s=>s.bb), 1)} />
+        <StatLine label="K" value={fmt(avgOf(secondStats, s=>s.k), 1)} />
+      </div>
+
+      <div style={{ display:"flex", flexDirection:"column", gap:0, border:`1px solid ${C.rule}`,
+        borderRadius:3, overflow:"hidden" }}>
+        <div style={{ display:"grid", gridTemplateColumns:"1.4fr 1fr 1.3fr 1.3fr", gap:8,
+          padding:"6px 10px", background:C.card, borderBottom:`1px solid ${C.rule}`,
+          fontFamily:MONO, fontSize:9.5, letterSpacing:"0.06em", textTransform:"uppercase",
+          color:C.ruleDark }}>
+          <span>Pitcher</span><span>vs</span><span>1st start (IP-H-ER-BB-K)</span><span>2nd start (IP-H-ER-BB-K)</span>
+        </div>
+        <div style={{ maxHeight:420, overflowY:"auto" }}>
+          {instances.map((inst,i) => (
+            <div key={i} style={{ display:"grid", gridTemplateColumns:"1.4fr 1fr 1.3fr 1.3fr", gap:8,
+              padding:"6px 10px", borderTop: i>0 ? `1px solid ${C.rule}` : "none",
+              fontFamily:SANS, fontSize:12.5, alignItems:"center" }}>
+              <span style={{ overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{inst.pitcherName}</span>
+              <span style={{ fontFamily:MONO, fontSize:11, color:C.inkSoft }}>{inst.oppName}</span>
+              <span style={{ fontFamily:MONO, fontSize:11 }}>
+                {inst.first.date} · {fmt(inst.firstStats.ip,1)}-{inst.firstStats.h}-{inst.firstStats.er}-{inst.firstStats.bb}-{inst.firstStats.k}
+              </span>
+              <span style={{ fontFamily:MONO, fontSize:11 }}>
+                {inst.second.date} · {fmt(inst.secondStats.ip,1)}-{inst.secondStats.h}-{inst.secondStats.er}-{inst.secondStats.bb}-{inst.secondStats.k}
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ResearchTab() {
+  const [scope] = useState(RESEARCH_SCOPES[0].key);
+  const [target] = useState(RESEARCH_TARGETS[0].key);
+  const [filters, setFilters] = useState(() => [newResearchFilter()]);
+  const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState(null);
+  const [err, setErr] = useState("");
+  const [results, setResults] = useState(null);
+
+  const updateFilter = (id, next) => setFilters(fs => fs.map(f => f.id===id ? next : f));
+  const removeFilter = (id) => setFilters(fs => fs.filter(f => f.id!==id));
+  const addFilter = () => setFilters(fs => [...fs, newResearchFilter()]);
+
+  const run = async () => {
+    const clean = filters.filter(f => f.value!=="" && f.value!=null && !Number.isNaN(Number(f.value)));
+    if (!clean.length) { setErr("Add at least one condition with a value first."); return; }
+    setBusy(true); setErr(""); setResults(null); setProgress({ done:0, total:0 });
+    try {
+      const rows = await runPitcherRematchResearch(clean, (done,total)=>setProgress({ done, total }));
+      setResults(rows);
+    } catch (e) {
+      setErr(isNet(e.message)
+        ? "Couldn't reach the MLB data service. This works from a normal browser tab with an internet connection."
+        : e.message);
+    } finally { setBusy(false); }
+  };
+
+  return (
+    <div>
+      <Eyebrow n="01">Theory</Eyebrow>
+      <div style={{ display:"flex", flexDirection:"column", gap:14, marginBottom:24 }}>
+        <div style={{ display:"flex", alignItems:"center", gap:8, flexWrap:"wrap" }}>
+          <span style={{ fontFamily:SANS, fontSize:13, color:C.inkSoft }}>Looking at</span>
+          <select value={scope} disabled={RESEARCH_SCOPES.length<2} style={researchSelectStyle}>
+            {RESEARCH_SCOPES.map(s => <option key={s.key} value={s.key}>{s.label}</option>)}
+          </select>
+          <span style={{ fontFamily:SANS, fontSize:13, color:C.inkSoft }}>, require:</span>
+        </div>
+
+        <div style={{ display:"flex", flexDirection:"column", gap:10, paddingLeft:4 }}>
+          {filters.map((f,i) => (
+            <div key={f.id} style={{ display:"flex", alignItems:"flex-start", gap:8 }}>
+              {i>0 && <span style={{ fontFamily:MONO, fontSize:10, letterSpacing:"0.1em",
+                textTransform:"uppercase", color:C.ruleDark, width:34, flexShrink:0, paddingTop:8 }}>and</span>}
+              <FilterRow filter={f} onChange={next=>updateFilter(f.id,next)}
+                onRemove={()=>removeFilter(f.id)} showRemove={filters.length>1} />
+            </div>
+          ))}
+        </div>
+
+        <button onClick={addFilter} style={{ alignSelf:"flex-start", padding:"6px 12px",
+          border:`1px dashed ${C.ruleDark}`, borderRadius:2, background:"transparent", color:C.inkSoft,
+          fontFamily:MONO, fontSize:11.5, letterSpacing:"0.06em", textTransform:"uppercase",
+          cursor:"pointer" }}>+ Add condition</button>
+
+        <div style={{ display:"flex", alignItems:"center", gap:8, flexWrap:"wrap" }}>
+          <span style={{ fontFamily:SANS, fontSize:13, color:C.inkSoft }}>Then show how he did in</span>
+          <select value={target} disabled={RESEARCH_TARGETS.length<2} style={researchSelectStyle}>
+            {RESEARCH_TARGETS.map(t => <option key={t.key} value={t.key}>{t.label}</option>)}
+          </select>
+        </div>
+      </div>
+
+      {err && <ErrBox>{err}</ErrBox>}
+
+      <button onClick={run} disabled={busy} style={{ padding:"9px 20px",
+        border:`1px solid ${C.ink}`, borderRadius:2, background:busy?C.rule:C.ink,
+        color:busy?C.inkSoft:"#fff", fontFamily:MONO, fontSize:12.5, letterSpacing:"0.08em",
+        textTransform:"uppercase", cursor:busy?"default":"pointer", marginBottom:20 }}>
+        {busy
+          ? (progress?.total ? `Scanning ${progress.done}/${progress.total} pitchers…` : "Starting…")
+          : "Run research →"}
+      </button>
+
+      {results!=null && (
+        <>
+          <Eyebrow n="02">Results</Eyebrow>
+          <ResearchResults instances={results} />
+        </>
+      )}
+    </div>
+  );
+}
+
 export default function App() {
   const [tab, setTab] = useState("calendar");
   const { tags, tagStatus, setTag, setResult, setStarred } = useTags();
@@ -4328,6 +4640,11 @@ export default function App() {
                 background:tab==="tags"?C.ink:"transparent", color:tab==="tags"?"#fff":C.inkSoft,
                 fontFamily:MONO, fontSize:12, letterSpacing:"0.08em", textTransform:"uppercase",
                 cursor:"pointer" }}>PLAYS</button>
+              <button onClick={()=>{ setTab("research"); setShowDatePicker(false); }} style={{ padding:"7px 15px",
+                border:`1px solid ${tab==="research"?C.ink:C.rule}`, borderRadius:2,
+                background:tab==="research"?C.ink:"transparent", color:tab==="research"?"#fff":C.inkSoft,
+                fontFamily:MONO, fontSize:12, letterSpacing:"0.08em", textTransform:"uppercase",
+                cursor:"pointer" }}>RESEARCH</button>
             </div>
           </div>
         </header>
@@ -4341,6 +4658,9 @@ export default function App() {
         </div>
         <div style={{ display: tab==="calendar" ? "block" : "none" }}>
           <TravelTrends tags={tags} setTag={setTag} onReady={setCal} />
+        </div>
+        <div style={{ display: tab==="research" ? "block" : "none" }}>
+          <ResearchTab />
         </div>
 
         <footer style={{ marginTop:40, paddingTop:14, borderTop:`1px solid ${C.rule}`,
