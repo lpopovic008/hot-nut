@@ -616,9 +616,13 @@ function sdqlEvalNode(node, rows, idx) {
     }
     case "param": {
       const key = node.name.toLowerCase();
-      if (SDQL_SHORTCUTS[node.name] && !node.prefixes.length) {
+      // shortcuts take a prefix chain like any other parameter, so p:W is
+      // "won the previous game" and o:H is "the opponent was at home"
+      if (SDQL_SHORTCUTS[node.name]) {
         const sc = SDQL_SHORTCUTS[node.name];
-        const v = SDQL_PARAMS[sc.param].get(rows[idx]);
+        const target = sdqlHop(rows, idx, node.prefixes);
+        if (target==null) return null;
+        const v = SDQL_PARAMS[sc.param].get(rows[target]);
         return v===sc.eq ? 1 : 0;
       }
       if (SDQL_NO_MARKET_SHORTCUTS[node.name])
