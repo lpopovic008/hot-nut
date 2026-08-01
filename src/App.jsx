@@ -290,7 +290,7 @@ function buildSdqlRows(games) {
       margin: me.score - opp.score,
       win: me.score > opp.score ? 1 : 0,
       loss: me.score < opp.score ? 1 : 0,
-      rest: null, streak: 0,
+      rest: null, streak: 0, smeetings: null,
       _opp: null, _prev: null, _next: null, _sprev: null,
     });
     rows.push(mk(home, away, "home", "home"));
@@ -343,6 +343,20 @@ function buildSdqlRows(games) {
     byStarter.set(r.starterId, i);
   });
 
+  // how many times this starter has ALREADY faced tonight's opponent this
+  // season. Counting meetings rather than walking s: back through the start
+  // sequence is the whole point: a pitcher's three turns against one club are
+  // usually spread across other opponents, so consecutive-start chains miss
+  // them. smeetings=2 means this is his third time out against this lineup.
+  const meetings = new Map();
+  rows.forEach(r => {
+    if (r.starterId==null || r.oTeamId==null) return;
+    const key = `${r.starterId}|${r.oTeamId}`;
+    const seen = meetings.get(key) || 0;
+    r.smeetings = seen;
+    meetings.set(key, seen+1);
+  });
+
   return rows;
 }
 
@@ -393,6 +407,8 @@ const SDQL_PARAMS = {
   opponent: { type:"str", get:r=>r.oTeam,    desc:"opponent name" },
   site:     { type:"str", get:r=>r.site,     desc:"'home' or 'away'" },
   starter:  { type:"str", get:r=>r.starter,  desc:"probable/actual starting pitcher" },
+  smeetings:{ type:"num", get:r=>r.smeetings,
+    desc:"starts this pitcher has already made against tonight's opponent this season — 2 means this is his third" },
 };
 for (let i=1; i<=9; i++) {
   SDQL_PARAMS[`inning${i}`] = { type:"num", get:r=>r.innings[i-1] ?? 0,
@@ -4912,6 +4928,8 @@ const SDQL_EXAMPLES = [
     why:"s: walks to the starter's last start, o: to what the other side did to him" },
   { q:"o:p:runs>=10",
     why:"prefixes chain: the opponent scored 10+ in THEIR previous game" },
+  { q:"smeetings=2 and o:smeetings=2",
+    why:"both starters are making their third start of the season against this same lineup" },
   { q:"A and W @ team",
     why:"@ groups the matches — road wins, broken out by team" },
 ];
