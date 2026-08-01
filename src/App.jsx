@@ -232,6 +232,468 @@ async function runPitcherRematchResearch(filters, onProgress) {
   return instances;
 }
 
+/* ══════════════════ SDQL — Sports Data Query Language ══════════════════
+   A replica of Killersports' SDQL over MLB Stats API data. A query is a
+   chain of phrases joined by `and`/`or`, where each phrase compares a
+   parameter to a value:  runs>5 and site=home and p:runs<3
+
+   The unit of a result is a TEAM-GAME, not a game, so every game in the
+   season produces two rows — one from each team's point of view. That is
+   what makes `o:` (the opponent's row) and plain `runs` mean different
+   things in the same query.
+
+   Parameters can be pointed at a different row with a prefix chain, read
+   left to right:  o: = the opponent's row in the same game, p: = this
+   team's previous game, n: = its next game, s: = the starting pitcher's
+   own previous start, t: = this row (a no-op, for symmetry). They combine
+   without restriction, so p:o:runs is "runs the opponent scored in this
+   team's last game" and o:p:runs is "runs the opponent scored in THEIR
+   last game".
+
+   Built from the published SDQL grammar; betting parameters (line, total,
+   moneyline and the F/D/O/U shortcuts) are deliberately absent because the
+   free MLB Stats API carries no market data — they parse, then report why
+   rather than silently returning nothing. */
+
+class SdqlError extends Error {}
+
+// one team's view of one finished game. Both rows of a game share a gamePk
+// and point at each other through _opp, which is what `o:` walks.
+function buildSdqlRows(games) {
+  const rows = [];
+  games.forEach(g => {
+    if (g.status?.abstractGameState !== "Final") return;
+    const ls = g.linescore || {};
+    const date = g.officialDate || (g.gameDate||"").slice(0,10);
+    if (!date) return;
+    const side = (which) => {
+      const t = g.teams?.[which] || {};
+      return {
+        name: t.team?.name || "—", id: t.team?.id ?? null, score: t.score,
+        hits: ls.teams?.[which]?.hits ?? null,
+        errors: ls.teams?.[which]?.errors ?? null,
+        starter: t.probablePitcher?.fullName || null,
+        starterId: t.probablePitcher?.id ?? null,
+      };
+    };
+    const home = side("home"), away = side("away");
+    if (home.score==null || away.score==null) return;   // postponed / no result
+    const innings = ls.innings || [];
+    const mk = (me, opp, siteName, key) => ({
+      gamePk: g.gamePk, date, dateNum: Number(date.replace(/-/g,"")),
+      season: SEASON, month: Number(date.slice(5,7)), day: Number(date.slice(8,10)),
+      dow: new Date(`${date}T12:00:00`).getDay(),
+      team: me.name, teamId: me.id, oTeam: opp.name, oTeamId: opp.id,
+      site: siteName, runs: me.score, hits: me.hits, errors: me.errors,
+      starter: me.starter, starterId: me.starterId,
+      innings: innings.map(i => i[key]?.runs ?? 0),
+      margin: me.score - opp.score,
+      win: me.score > opp.score ? 1 : 0,
+      loss: me.score < opp.score ? 1 : 0,
+      rest: null, streak: 0,
+      _opp: null, _prev: null, _next: null, _sprev: null,
+    });
+    rows.push(mk(home, away, "home", "home"));
+    rows.push(mk(away, home, "away", "away"));
+  });
+
+  rows.sort((a,b) => a.dateNum-b.dateNum || a.gamePk-b.gamePk
+    || a.site.localeCompare(b.site));
+
+  // pair the two rows of each game together
+  const byGame = new Map();
+  rows.forEach((r,i) => {
+    const pair = byGame.get(r.gamePk);
+    if (pair==null) byGame.set(r.gamePk, i);
+    else { rows[i]._opp = pair; rows[pair]._opp = i; }
+  });
+
+  // chronological chain per team, which also yields rest days and the
+  // win/loss streak the team carried INTO each game (not out of it)
+  const byTeam = new Map();
+  rows.forEach((r,i) => {
+    if (r.teamId==null) return;
+    if (!byTeam.has(r.teamId)) byTeam.set(r.teamId, []);
+    byTeam.get(r.teamId).push(i);
+  });
+  byTeam.forEach(idxs => {
+    let streak = 0;
+    idxs.forEach((i,n) => {
+      const r = rows[i];
+      r.streak = streak;
+      if (n>0) {
+        const prev = rows[idxs[n-1]];
+        r._prev = idxs[n-1];
+        prev._next = i;
+        // days off between games; the back half of a doubleheader is 0, not -1
+        r.rest = Math.max(0, Math.round(
+          (new Date(`${r.date}T12:00:00`) - new Date(`${prev.date}T12:00:00`))
+          / 86400000) - 1);
+      }
+      streak = r.win ? (streak>0 ? streak+1 : 1) : r.loss ? (streak<0 ? streak-1 : -1) : streak;
+    });
+  });
+
+  // the starter's own previous start, which is what MLB's s: prefix walks
+  const byStarter = new Map();
+  rows.forEach((r,i) => {
+    if (r.starterId==null) return;
+    const prev = byStarter.get(r.starterId);
+    if (prev!=null) r._sprev = prev;
+    byStarter.set(r.starterId, i);
+  });
+
+  return rows;
+}
+
+// the whole season is one fetch per month so the responses stay small and
+// the progress counter has something to report; cached for the session
+// because a second query should be instant.
+let sdqlSeasonCache = null;
+function loadSdqlSeason(onProgress) {
+  if (sdqlSeasonCache) return sdqlSeasonCache;
+  sdqlSeasonCache = (async () => {
+    const spans = [[3,1,3,31],[4,1,4,30],[5,1,5,31],[6,1,6,30],
+      [7,1,7,31],[8,1,8,31],[9,1,9,30],[10,1,10,31]];
+    const pad = (n) => String(n).padStart(2,"0");
+    const games = [];
+    let done = 0;
+    for (const [m1,d1,m2,d2] of spans) {
+      const r = await fetch(`${API}/schedule?sportId=1&gameType=R` +
+        `&startDate=${SEASON}-${pad(m1)}-${pad(d1)}&endDate=${SEASON}-${pad(m2)}-${pad(d2)}` +
+        `&hydrate=linescore,probablePitcher`);
+      if (!r.ok) throw new Error(`schedule ${r.status}`);
+      const j = await r.json();
+      (j.dates||[]).forEach(d => (d.games||[]).forEach(g => games.push(g)));
+      onProgress?.(++done, spans.length);
+    }
+    return buildSdqlRows(games);
+  })();
+  // a failed load must not poison every later attempt
+  sdqlSeasonCache.catch(() => { sdqlSeasonCache = null; });
+  return sdqlSeasonCache;
+}
+
+/* ── the parameter vocabulary ───────────────────────────────────────── */
+const SDQL_PARAMS = {
+  runs:     { type:"num", get:r=>r.runs,     desc:"runs scored by the team" },
+  hits:     { type:"num", get:r=>r.hits,     desc:"team hits" },
+  errors:   { type:"num", get:r=>r.errors,   desc:"team errors" },
+  margin:   { type:"num", get:r=>r.margin,   desc:"runs scored minus runs allowed" },
+  win:      { type:"num", get:r=>r.win,      desc:"1 on a win, 0 otherwise" },
+  loss:     { type:"num", get:r=>r.loss,     desc:"1 on a loss, 0 otherwise" },
+  streak:   { type:"num", get:r=>r.streak,   desc:"W/L streak carried into the game (+3 = won last 3)" },
+  rest:     { type:"num", get:r=>r.rest,     desc:"days off before the game (0 = played yesterday)" },
+  date:     { type:"num", get:r=>r.dateNum,  desc:"game date as YYYYMMDD" },
+  season:   { type:"num", get:r=>r.season,   desc:"season year" },
+  month:    { type:"num", get:r=>r.month,    desc:"month, 3–10" },
+  day:      { type:"num", get:r=>r.day,      desc:"day of the month" },
+  dow:      { type:"num", get:r=>r.dow,      desc:"day of week, 0 = Sunday" },
+  team:     { type:"str", get:r=>r.team,     desc:"team name" },
+  opponent: { type:"str", get:r=>r.oTeam,    desc:"opponent name" },
+  site:     { type:"str", get:r=>r.site,     desc:"'home' or 'away'" },
+  starter:  { type:"str", get:r=>r.starter,  desc:"probable/actual starting pitcher" },
+};
+for (let i=1; i<=9; i++) {
+  SDQL_PARAMS[`inning${i}`] = { type:"num", get:r=>r.innings[i-1] ?? 0,
+    desc:`runs scored in inning ${i}` };
+}
+// present in real SDQL, absent here — named explicitly so a query using one
+// gets a reason instead of a bare "unknown parameter".
+const SDQL_NO_MARKET = {
+  line:"the pointspread/run line", total:"the betting total",
+  moneyline:"the moneyline", ou:"the over/under result",
+};
+const SDQL_SHORTCUTS = {
+  H:{ param:"site", eq:"home" }, A:{ param:"site", eq:"away" },
+  W:{ param:"win",  eq:1 },      L:{ param:"loss", eq:1 },
+};
+const SDQL_NO_MARKET_SHORTCUTS = { F:"favorite", D:"underdog", O:"over", U:"under" };
+const SDQL_PREFIXES = {
+  o:"the opponent's row in the same game",
+  p:"this team's previous game",
+  n:"this team's next game",
+  s:"the starting pitcher's previous start",
+  t:"this row (no-op)",
+};
+
+/* ── tokenizer ──────────────────────────────────────────────────────── */
+function sdqlTokenize(src) {
+  const out = [];
+  const ops = [">=","<=","!=","<>","==","=",">","<","+","-","*","/","(",")",",","@",":"];
+  let i = 0;
+  while (i < src.length) {
+    const c = src[i];
+    if (/\s/.test(c)) { i++; continue; }
+    if (c === "'" || c === '"') {
+      const end = src.indexOf(c, i+1);
+      if (end < 0) throw new SdqlError(`unterminated string starting at position ${i+1}`);
+      out.push({ t:"str", v:src.slice(i+1,end) }); i = end+1; continue;
+    }
+    if (/[0-9]/.test(c) || (c==="." && /[0-9]/.test(src[i+1]||""))) {
+      const m = /^[0-9]*\.?[0-9]+/.exec(src.slice(i));
+      out.push({ t:"num", v:Number(m[0]) }); i += m[0].length; continue;
+    }
+    if (/[A-Za-z_]/.test(c)) {
+      const m = /^[A-Za-z_][A-Za-z0-9_]*/.exec(src.slice(i));
+      out.push({ t:"word", v:m[0] }); i += m[0].length; continue;
+    }
+    const op = ops.find(o => src.startsWith(o, i));
+    if (!op) throw new SdqlError(`unexpected character "${c}" at position ${i+1}`);
+    out.push({ t:"op", v: op==="<>" ? "!=" : op==="==" ? "=" : op }); i += op.length;
+  }
+  out.push({ t:"end", v:null });
+  return out;
+}
+
+/* ── parser ─────────────────────────────────────────────────────────────
+   precedence, loosest first: or → and → not → comparison → +/- → *,/ */
+function sdqlParse(src) {
+  const toks = sdqlTokenize(src);
+  let pos = 0;
+  const peek = () => toks[pos];
+  const isOp = (v) => peek().t==="op" && peek().v===v;
+  const isWord = (v) => peek().t==="word" && peek().v.toLowerCase()===v;
+  const eat = () => toks[pos++];
+  const expect = (v) => { if (!isOp(v)) throw new SdqlError(`expected "${v}"`); return eat(); };
+
+  function parseOr() {
+    let l = parseAnd();
+    while (isWord("or")) { eat(); l = { k:"or", l, r:parseAnd() }; }
+    return l;
+  }
+  function parseAnd() {
+    let l = parseNot();
+    while (isWord("and")) { eat(); l = { k:"and", l, r:parseNot() }; }
+    return l;
+  }
+  function parseNot() {
+    if (isWord("not")) { eat(); return { k:"not", x:parseNot() }; }
+    return parseCmp();
+  }
+  function parseCmp() {
+    let l = parseAdd();
+    for (;;) {
+      const cmp = ["=","!=",">","<",">=","<="].find(o => isOp(o));
+      if (cmp) { eat(); l = { k:"cmp", op:cmp, l, r:parseAdd() }; continue; }
+      if (isWord("in")) { eat(); l = { k:"in", l, r:parseAdd() }; continue; }
+      return l;
+    }
+  }
+  function parseAdd() {
+    let l = parseMul();
+    while (isOp("+") || isOp("-")) { const op = eat().v; l = { k:"bin", op, l, r:parseMul() }; }
+    return l;
+  }
+  function parseMul() {
+    let l = parseUnary();
+    while (isOp("*") || isOp("/")) { const op = eat().v; l = { k:"bin", op, l, r:parseUnary() }; }
+    return l;
+  }
+  function parseUnary() {
+    if (isOp("-")) { eat(); return { k:"neg", x:parseUnary() }; }
+    return parsePrimary();
+  }
+  function parsePrimary() {
+    const tk = peek();
+    if (tk.t==="num") { eat(); return { k:"lit", v:tk.v }; }
+    if (tk.t==="str") { eat(); return { k:"lit", v:tk.v }; }
+    if (isOp("(")) {
+      eat();
+      const first = parseOr();
+      if (isOp(",")) {                     // a list, for the `in` operator
+        const items = [first];
+        while (isOp(",")) { eat(); items.push(parseOr()); }
+        expect(")");
+        return { k:"list", items };
+      }
+      expect(")");
+      return first;
+    }
+    if (tk.t==="word") {
+      const prefixes = [];
+      let word = eat().v;
+      while (isOp(":")) { eat();
+        prefixes.push(word.toLowerCase());
+        if (peek().t!=="word") throw new SdqlError(`expected a parameter after "${word}:"`);
+        word = eat().v;
+      }
+      return { k:"param", prefixes, name:word };
+    }
+    throw new SdqlError("unexpected end of query");
+  }
+
+  const where = parseOr();
+  let groupBy = [];
+  if (isOp("@")) {
+    eat();
+    for (;;) {
+      if (peek().t!=="word") throw new SdqlError("expected a parameter to group by after @");
+      groupBy.push(eat().v.toLowerCase());
+      if (isOp(",")) { eat(); continue; }
+      break;
+    }
+  }
+  if (peek().t!=="end") throw new SdqlError(`unexpected "${peek().v}" after the end of the query`);
+  return { where, groupBy };
+}
+
+/* ── evaluator ──────────────────────────────────────────────────────── */
+// walk a prefix chain left to right; returns null when the chain runs off
+// the end of a team's season (no previous game, no next game, …).
+function sdqlHop(rows, idx, prefixes) {
+  let cur = idx;
+  for (const p of prefixes) {
+    if (cur==null) return null;
+    const r = rows[cur];
+    if (p==="o") cur = r._opp;
+    else if (p==="p") cur = r._prev;
+    else if (p==="n") cur = r._next;
+    else if (p==="s") cur = r._sprev;
+    else if (p==="t") { /* this row */ }
+    else throw new SdqlError(`unknown prefix "${p}:" — try ${Object.keys(SDQL_PREFIXES).map(x=>x+":").join(", ")}`);
+    if (cur===undefined) cur = null;
+  }
+  return cur;
+}
+
+const sdqlTruthy = (v) => v===true || (typeof v==="number" && v!==0);
+
+function sdqlEvalNode(node, rows, idx) {
+  switch (node.k) {
+    case "lit": return node.v;
+    case "list": return node.items.map(n => sdqlEvalNode(n, rows, idx));
+    case "neg": {
+      const v = sdqlEvalNode(node.x, rows, idx);
+      return v==null ? null : -v;
+    }
+    case "and": return sdqlTruthy(sdqlEvalNode(node.l, rows, idx))
+      && sdqlTruthy(sdqlEvalNode(node.r, rows, idx));
+    case "or": return sdqlTruthy(sdqlEvalNode(node.l, rows, idx))
+      || sdqlTruthy(sdqlEvalNode(node.r, rows, idx));
+    case "not": return !sdqlTruthy(sdqlEvalNode(node.x, rows, idx));
+    case "bin": {
+      const a = sdqlEvalNode(node.l, rows, idx), b = sdqlEvalNode(node.r, rows, idx);
+      if (a==null || b==null) return null;
+      if (node.op==="+" && (typeof a==="string" || typeof b==="string")) return `${a}${b}`;
+      const x = Number(a), y = Number(b);
+      if (Number.isNaN(x) || Number.isNaN(y)) return null;
+      return node.op==="+" ? x+y : node.op==="-" ? x-y
+        : node.op==="*" ? x*y : (y===0 ? null : x/y);
+    }
+    case "in": {
+      const a = sdqlEvalNode(node.l, rows, idx);
+      const list = sdqlEvalNode(node.r, rows, idx);
+      if (a==null) return false;
+      return (Array.isArray(list) ? list : [list])
+        .some(v => sdqlCompare("=", a, v, node));
+    }
+    case "cmp": {
+      const a = sdqlEvalNode(node.l, rows, idx), b = sdqlEvalNode(node.r, rows, idx);
+      return sdqlCompare(node.op, a, b, node);
+    }
+    case "param": {
+      const key = node.name.toLowerCase();
+      if (SDQL_SHORTCUTS[node.name] && !node.prefixes.length) {
+        const sc = SDQL_SHORTCUTS[node.name];
+        const v = SDQL_PARAMS[sc.param].get(rows[idx]);
+        return v===sc.eq ? 1 : 0;
+      }
+      if (SDQL_NO_MARKET_SHORTCUTS[node.name])
+        throw new SdqlError(`"${node.name}" needs betting-market data (${SDQL_NO_MARKET_SHORTCUTS[node.name]}), ` +
+          `which the free MLB Stats API doesn't carry.`);
+      if (SDQL_NO_MARKET[key])
+        throw new SdqlError(`"${key}" is ${SDQL_NO_MARKET[key]} — the free MLB Stats API carries no ` +
+          `market data, so this parameter isn't available here.`);
+      const spec = SDQL_PARAMS[key];
+      if (!spec) {
+        // a bare word that isn't a parameter is a string value, which is what
+        // makes team=Yankees work without quotes
+        if (!node.prefixes.length) return { _bare: node.name };
+        throw new SdqlError(`unknown parameter "${node.name}"`);
+      }
+      const target = sdqlHop(rows, idx, node.prefixes);
+      if (target==null) return null;
+      const v = spec.get(rows[target]);
+      return v==null ? null : v;
+    }
+    default: throw new SdqlError("could not evaluate the query");
+  }
+}
+
+// bare words carry through as {_bare} so a typo compared against a number
+// can be reported as an unknown parameter rather than silently never matching
+function sdqlCompare(op, a, b, node) {
+  const bareA = a && typeof a==="object" && "_bare" in a;
+  const bareB = b && typeof b==="object" && "_bare" in b;
+  if (bareA && typeof b==="number") throw new SdqlError(`unknown parameter "${a._bare}"`);
+  if (bareB && typeof a==="number") throw new SdqlError(`unknown parameter "${b._bare}"`);
+  const av = bareA ? a._bare : a, bv = bareB ? b._bare : b;
+  if (av==null || bv==null) return false;   // a row the prefix chain can't reach never matches
+  if (typeof av==="string" || typeof bv==="string") {
+    const x = String(av).toLowerCase(), y = String(bv).toLowerCase();
+    if (op==="=") return x===y;
+    if (op==="!=") return x!==y;
+    if (node) throw new SdqlError(`can't use "${op}" to compare text values`);
+    return false;
+  }
+  switch (op) {
+    case "=":  return av===bv;
+    case "!=": return av!==bv;
+    case ">":  return av>bv;
+    case "<":  return av<bv;
+    case ">=": return av>=bv;
+    case "<=": return av<=bv;
+    default:   return false;
+  }
+}
+
+// run a parsed query over the season and summarize the team-games it matched
+function sdqlRun(ast, rows) {
+  const matched = [];
+  rows.forEach((r,i) => { if (sdqlTruthy(sdqlEvalNode(ast.where, rows, i))) matched.push(i); });
+  const summarize = (idxs) => {
+    const n = idxs.length;
+    const sum = (fn) => idxs.reduce((s,i) => s + (Number(fn(rows[i]))||0), 0);
+    const oppRuns = (i) => rows[i]._opp==null ? 0 : rows[rows[i]._opp].runs;
+    return {
+      games: n,
+      wins: idxs.filter(i=>rows[i].win).length,
+      losses: idxs.filter(i=>rows[i].loss).length,
+      runs: n ? sum(r=>r.runs)/n : null,
+      oRuns: n ? idxs.reduce((s,i)=>s+oppRuns(i),0)/n : null,
+      combined: n ? idxs.reduce((s,i)=>s+rows[i].runs+oppRuns(i),0)/n : null,
+      margin: n ? sum(r=>r.margin)/n : null,
+    };
+  };
+  let groups = null;
+  if (ast.groupBy.length) {
+    const keyOf = (i) => ast.groupBy.map(g => {
+      if (SDQL_PARAMS[g]) return String(SDQL_PARAMS[g].get(rows[i]) ?? "—");
+      throw new SdqlError(`can't group by "${g}" — not a parameter`);
+    }).join(" · ");
+    const buckets = new Map();
+    matched.forEach(i => {
+      const k = keyOf(i);
+      if (!buckets.has(k)) buckets.set(k, []);
+      buckets.get(k).push(i);
+    });
+    groups = [...buckets.entries()]
+      .map(([key, idxs]) => ({ key, ...summarize(idxs) }))
+      .sort((a,b) => b.games-a.games || a.key.localeCompare(b.key));
+  }
+  return {
+    total: summarize(matched),
+    groups,
+    groupBy: ast.groupBy,
+    rows: matched.slice().reverse().map(i => {
+      const r = rows[i], o = r._opp==null ? null : rows[r._opp];
+      return { date:r.date, team:r.team, site:r.site, oTeam:r.oTeam,
+        runs:r.runs, oRuns:o?o.runs:null, win:r.win, loss:r.loss, starter:r.starter };
+    }),
+  };
+}
+
 // hits+walks (times on base) plus total bases (hits, plus extra credit for
 // doubles/triples/homers when present) allowed or produced in one game/
 // stint — the same OPS-flavored "combined production" figure used by both
@@ -4436,7 +4898,255 @@ function ResearchResults({ instances }) {
   );
 }
 
+/* ── SDQL panel ─────────────────────────────────────────────────────── */
+const SDQL_EXAMPLES = [
+  { q:"runs>5 and site=home",
+    why:"the plain shape of a query — a parameter, an operator, a value" },
+  { q:"p:runs=0",
+    why:"p: looks back a game: every team coming off a shutout" },
+  { q:"p:runs=0 and runs>4",
+    why:"…and how often that team erupts the very next night" },
+  { q:"streak<=-3 and site=home",
+    why:"home teams carrying a losing streak of three or more into the game" },
+  { q:"s:o:runs>=6",
+    why:"s: walks to the starter's last start, o: to what the other side did to him" },
+  { q:"o:p:runs>=10",
+    why:"prefixes chain: the opponent scored 10+ in THEIR previous game" },
+  { q:"A and W @ team",
+    why:"@ groups the matches — road wins, broken out by team" },
+];
+
+const sdqlCell = { fontFamily:MONO, fontSize:11.5, color:C.ink };
+const sdqlDesc = { fontFamily:SANS, fontSize:12, color:C.inkSoft };
+const SdqlRefRow = ({ k, v }) => (
+  <div style={{ display:"grid", gridTemplateColumns:"120px 1fr", gap:10, padding:"3px 0" }}>
+    <span style={sdqlCell}>{k}</span><span style={sdqlDesc}>{v}</span>
+  </div>
+);
+
+function SdqlReference() {
+  const [open, setOpen] = useState(false);
+  const cell = sdqlCell, desc = sdqlDesc;
+  return (
+    <div style={{ border:`1px solid ${C.rule}`, borderRadius:3, marginBottom:18 }}>
+      <button onClick={()=>setOpen(o=>!o)} style={{ width:"100%", textAlign:"left",
+        padding:"9px 14px", border:"none", background:C.card, cursor:"pointer",
+        fontFamily:MONO, fontSize:11, letterSpacing:"0.14em", textTransform:"uppercase",
+        color:C.inkSoft, borderRadius:3 }}>
+        {open ? "▾" : "▸"} Syntax reference
+      </button>
+      {open && (
+        <div style={{ padding:"12px 14px", display:"flex", flexDirection:"column", gap:14 }}>
+          <div>
+            <div style={{ ...desc, marginBottom:8 }}>
+              A query is a chain of phrases joined by <code style={cell}>and</code> /
+              {" "}<code style={cell}>or</code>, optionally negated with <code style={cell}>not</code>.
+              One result is one <em>team-game</em>, so each game in the season is
+              tested twice — once from each side.
+            </div>
+          </div>
+          <div>
+            <div style={{ fontFamily:MONO, fontSize:10, letterSpacing:"0.12em",
+              textTransform:"uppercase", color:C.ruleDark, marginBottom:6 }}>Prefixes — chain freely, read left to right</div>
+            {Object.entries(SDQL_PREFIXES).map(([k,v]) => <SdqlRefRow key={k} k={`${k}:`} v={v} />)}
+            <div style={{ ...desc, marginTop:6 }}>
+              <code style={cell}>p:o:runs</code> = runs the opponent scored in this team's last
+              game; <code style={cell}>o:p:runs</code> = runs the opponent scored in <em>their</em> last game.
+            </div>
+          </div>
+          <div>
+            <div style={{ fontFamily:MONO, fontSize:10, letterSpacing:"0.12em",
+              textTransform:"uppercase", color:C.ruleDark, marginBottom:6 }}>Parameters</div>
+            {Object.entries(SDQL_PARAMS)
+              .filter(([k]) => !/^inning[2-9]$/.test(k))
+              .map(([k,v]) => <SdqlRefRow key={k} k={k} v={k==="inning1" ? "runs scored in inning 1 (through inning9)" : v.desc} />)}
+          </div>
+          <div>
+            <div style={{ fontFamily:MONO, fontSize:10, letterSpacing:"0.12em",
+              textTransform:"uppercase", color:C.ruleDark, marginBottom:6 }}>Shortcuts</div>
+            <SdqlRefRow k="H / A" v="home / away" />
+            <SdqlRefRow k="W / L" v="win / loss" />
+          </div>
+          <div>
+            <div style={{ fontFamily:MONO, fontSize:10, letterSpacing:"0.12em",
+              textTransform:"uppercase", color:C.ruleDark, marginBottom:6 }}>Operators</div>
+            <SdqlRefRow k="= != > < >= <=" v="comparison; text compares case-insensitively" />
+            <SdqlRefRow k="+ - * /" v="arithmetic, so runs+o:runs is the combined score" />
+            <SdqlRefRow k="in" v="membership: team in ('Yankees','Red Sox')" />
+            <SdqlRefRow k="@" v="group the results: … @ team, or @ month" />
+          </div>
+          <div style={{ ...desc, borderTop:`1px solid ${C.rule}`, paddingTop:10 }}>
+            <strong>Not available here:</strong> every betting parameter —
+            {" "}<code style={cell}>line</code>, <code style={cell}>total</code>,
+            {" "}<code style={cell}>moneyline</code> and the <code style={cell}>F</code>/
+            <code style={cell}>D</code>/<code style={cell}>O</code>/<code style={cell}>U</code>{" "}
+            shortcuts. The MLB Stats API is free and carries no market data, so those
+            parse but report why instead of quietly matching nothing.
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SdqlResults({ res }) {
+  if (!res) return null;
+  const { total, groups, groupBy } = res;
+  if (!total.games) {
+    return (
+      <div style={{ padding:"14px 16px", background:C.card, border:`1px solid ${C.rule}`,
+        borderRadius:3, fontFamily:SANS, fontSize:13, color:C.inkSoft }}>
+        0 team-games matched. Loosen a condition, or check that the season has
+        enough games played yet.
+      </div>
+    );
+  }
+  const pct = total.games ? (total.wins/(total.wins+total.losses||1))*100 : 0;
+  const shown = res.rows.slice(0, 200);
+  return (
+    <div>
+      <div style={{ display:"flex", flexDirection:"column", gap:2, padding:"12px 16px",
+        background:C.card, border:`1px solid ${C.rule}`, borderRadius:3, marginBottom:14 }}>
+        <div style={{ fontFamily:MONO, fontSize:11, letterSpacing:"0.1em", textTransform:"uppercase",
+          color:C.ruleDark, marginBottom:4 }}>
+          {total.games} team-game{total.games===1?"":"s"} matched
+        </div>
+        <StatLine label="Record" value={`${total.wins}-${total.losses} (${pct.toFixed(1)}%)`} />
+        <StatLine label="Runs scored" value={fmt(total.runs)} />
+        <StatLine label="Runs allowed" value={fmt(total.oRuns)} />
+        <StatLine label="Combined" value={fmt(total.combined)} />
+        <StatLine label="Margin" value={(total.margin>0?"+":"") + fmt(total.margin)} />
+      </div>
+
+      {groups && (
+        <div style={{ border:`1px solid ${C.rule}`, borderRadius:3, overflow:"hidden", marginBottom:14 }}>
+          <div style={{ display:"grid", gridTemplateColumns:"1.6fr 0.8fr 1fr 0.9fr 0.9fr", gap:8,
+            padding:"6px 10px", background:C.card, borderBottom:`1px solid ${C.rule}`,
+            fontFamily:MONO, fontSize:9.5, letterSpacing:"0.06em", textTransform:"uppercase",
+            color:C.ruleDark }}>
+            <span>{groupBy.join(" · ")}</span><span>GP</span><span>Record</span>
+            <span>R</span><span>RA</span>
+          </div>
+          <div style={{ maxHeight:300, overflowY:"auto" }}>
+            {groups.map((g,i) => (
+              <div key={g.key} style={{ display:"grid", gridTemplateColumns:"1.6fr 0.8fr 1fr 0.9fr 0.9fr",
+                gap:8, padding:"6px 10px", borderTop: i>0 ? `1px solid ${C.rule}` : "none",
+                fontFamily:SANS, fontSize:12.5, alignItems:"center" }}>
+                <span style={{ overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{g.key}</span>
+                <span style={{ fontFamily:MONO, fontSize:11.5 }}>{g.games}</span>
+                <span style={{ fontFamily:MONO, fontSize:11.5 }}>{g.wins}-{g.losses}</span>
+                <span style={{ fontFamily:MONO, fontSize:11.5 }}>{fmt(g.runs,1)}</span>
+                <span style={{ fontFamily:MONO, fontSize:11.5 }}>{fmt(g.oRuns,1)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div style={{ border:`1px solid ${C.rule}`, borderRadius:3, overflow:"hidden" }}>
+        <div style={{ display:"grid", gridTemplateColumns:"0.9fr 1.3fr 0.4fr 1.3fr 0.8fr", gap:8,
+          padding:"6px 10px", background:C.card, borderBottom:`1px solid ${C.rule}`,
+          fontFamily:MONO, fontSize:9.5, letterSpacing:"0.06em", textTransform:"uppercase",
+          color:C.ruleDark }}>
+          <span>Date</span><span>Team</span><span /><span>Opponent</span><span>Score</span>
+        </div>
+        <div style={{ maxHeight:420, overflowY:"auto" }}>
+          {shown.map((r,i) => (
+            <div key={i} style={{ display:"grid", gridTemplateColumns:"0.9fr 1.3fr 0.4fr 1.3fr 0.8fr",
+              gap:8, padding:"6px 10px", borderTop: i>0 ? `1px solid ${C.rule}` : "none",
+              fontFamily:SANS, fontSize:12.5, alignItems:"center" }}>
+              <span style={{ fontFamily:MONO, fontSize:11 }}>{r.date.slice(5)}</span>
+              <span style={{ overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{r.team}</span>
+              <span style={{ fontFamily:MONO, fontSize:10, color:C.ruleDark }}>{r.site==="home"?"vs":"@"}</span>
+              <span style={{ overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap",
+                color:C.inkSoft }}>{r.oTeam}</span>
+              <span style={{ fontFamily:MONO, fontSize:11.5, fontWeight:700,
+                color: r.win ? C.over : r.loss ? C.under : C.ink }}>
+                {r.runs}-{r.oRuns==null?"–":r.oRuns}
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+      {res.rows.length > shown.length && (
+        <div style={{ fontFamily:SANS, fontSize:12, color:C.inkSoft, marginTop:8 }}>
+          Showing the most recent {shown.length} of {res.rows.length} matches.
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SdqlPanel() {
+  const [q, setQ] = useState("p:runs=0 and runs>4");
+  const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState(null);
+  const [err, setErr] = useState("");
+  const [res, setRes] = useState(null);
+
+  const run = async () => {
+    const src = q.trim();
+    if (!src) { setErr("Type a query first — try one of the examples below."); return; }
+    let ast;
+    try { ast = sdqlParse(src); }
+    catch (e) { setErr(`Syntax: ${e.message}`); setRes(null); return; }
+    setBusy(true); setErr(""); setRes(null); setProgress(null);
+    try {
+      const rows = await loadSdqlSeason((done,total)=>setProgress({ done, total }));
+      setRes(sdqlRun(ast, rows));
+    } catch (e) {
+      setErr(e instanceof SdqlError ? e.message
+        : isNet(e.message)
+          ? "Couldn't reach the MLB data service. This works from a normal browser tab with an internet connection."
+          : e.message);
+    } finally { setBusy(false); }
+  };
+
+  return (
+    <div>
+      <Eyebrow n="01">Query</Eyebrow>
+      <textarea value={q} onChange={e=>setQ(e.target.value)} rows={2} spellCheck={false}
+        onKeyDown={e=>{ if (e.key==="Enter" && (e.metaKey||e.ctrlKey)) run(); }}
+        style={{ ...inputStyle, width:"100%", fontFamily:MONO, resize:"vertical",
+          lineHeight:1.5, marginBottom:12 }} />
+
+      {err && <ErrBox>{err}</ErrBox>}
+
+      <button onClick={run} disabled={busy} style={{ padding:"9px 20px",
+        border:`1px solid ${C.ink}`, borderRadius:2, background:busy?C.rule:C.ink,
+        color:busy?C.inkSoft:"#fff", fontFamily:MONO, fontSize:12.5, letterSpacing:"0.08em",
+        textTransform:"uppercase", cursor:busy?"default":"pointer", marginBottom:20 }}>
+        {busy
+          ? (progress ? `Loading season ${progress.done}/${progress.total}…` : "Running…")
+          : "Run query →"}
+      </button>
+
+      {res && (
+        <div style={{ marginBottom:26 }}>
+          <Eyebrow n="02">Results</Eyebrow>
+          <SdqlResults res={res} />
+        </div>
+      )}
+
+      <Eyebrow>Examples</Eyebrow>
+      <div style={{ display:"flex", flexDirection:"column", gap:8, marginBottom:20 }}>
+        {SDQL_EXAMPLES.map(ex => (
+          <button key={ex.q} onClick={()=>{ setQ(ex.q); setErr(""); }}
+            style={{ textAlign:"left", padding:"8px 11px", border:`1px solid ${C.rule}`,
+              borderRadius:2, background:C.card, cursor:"pointer" }}>
+            <div style={{ fontFamily:MONO, fontSize:12, color:C.ink }}>{ex.q}</div>
+            <div style={{ fontFamily:SANS, fontSize:11.5, color:C.inkSoft, marginTop:3 }}>{ex.why}</div>
+          </button>
+        ))}
+      </div>
+
+      <SdqlReference />
+    </div>
+  );
+}
+
 function ResearchTab() {
+  const [mode, setMode] = useState("sdql");
   const [scope] = useState(RESEARCH_SCOPES[0].key);
   const [target] = useState(RESEARCH_TARGETS[0].key);
   const [filters, setFilters] = useState(() => [newResearchFilter()]);
@@ -4463,8 +5173,23 @@ function ResearchTab() {
     } finally { setBusy(false); }
   };
 
+  const modeBtn = (key, label) => (
+    <button key={key} onClick={()=>setMode(key)} style={{ padding:"6px 14px",
+      border:`1px solid ${mode===key?C.ink:C.rule}`, borderRadius:2,
+      background:mode===key?C.ink:"transparent", color:mode===key?"#fff":C.inkSoft,
+      fontFamily:MONO, fontSize:11, letterSpacing:"0.1em", textTransform:"uppercase",
+      cursor:"pointer" }}>{label}</button>
+  );
+
   return (
     <div>
+      <div style={{ display:"flex", gap:8, marginBottom:20 }}>
+        {modeBtn("sdql","SDQL")}
+        {modeBtn("builder","Builder")}
+      </div>
+
+      {mode==="sdql" ? <SdqlPanel /> : (
+      <>
       <Eyebrow n="01">Theory</Eyebrow>
       <div style={{ display:"flex", flexDirection:"column", gap:14, marginBottom:24 }}>
         <div style={{ display:"flex", alignItems:"center", gap:8, flexWrap:"wrap" }}>
@@ -4515,6 +5240,8 @@ function ResearchTab() {
           <Eyebrow n="02">Results</Eyebrow>
           <ResearchResults instances={results} />
         </>
+      )}
+      </>
       )}
     </div>
   );
