@@ -720,31 +720,48 @@ function sdqlRun(ast, rows) {
   };
 }
 
-// hits+walks (times on base) plus total bases (hits, plus extra credit for
-// doubles/triples/homers when present) allowed or produced in one game/
-// stint — the same OPS-flavored "combined production" figure used by both
-// the batting score (a team's own output) and the pitcher score (what a
-// pitcher allowed), just read from whichever side's stat line.
+// net offensive production in one game/stint: times on base (hits + walks)
+// plus total bases (hits, with extra credit for doubles/triples/homers when
+// present), LESS strikeouts. A punchout subtracts because it's the one out
+// that advances nothing — no ball in play, no runner moved, no chance of a
+// defensive mistake — so two teams with identical hit and walk totals are
+// separated by how often they put the ball in play.
+//
+// The same OPS-flavored figure serves both the batting score (a team's own
+// output) and the pitcher score (what a pitcher allowed), read from
+// whichever side's stat line. Netting out strikeouts is the right direction
+// for both: a pitcher's own K's reduce the production charged against him.
 function combinedProduction(stat) {
-  const h = Number(stat?.hits)||0, bb = Number(stat?.baseOnBalls)||0;
+  const h = Number(stat?.hits)||0, bb = Number(stat?.baseOnBalls)||0,
+    k = Number(stat?.strikeOuts)||0;
   const doubles = Number(stat?.doubles)||0, triples = Number(stat?.triples)||0, hr = Number(stat?.homeRuns)||0;
   const totalBases = h + doubles + 2*triples + 3*hr;
-  return (h+bb) + totalBases;
+  return (h+bb) + totalBases - k;
 }
 // same "combined production" concept, but as a rate — per 9 innings for a
 // pitcher's own season line, or per team-game (treated as a stand-in for
-// "per 9 innings faced") for a team's season hitting line.
+// "per 9 innings faced") for a team's season hitting line. Must subtract the
+// strikeout rate to match combinedProduction above, or every actual would be
+// measured against an inflated expectation.
 function combinedProduction9(rates) {
-  return (rates.h9+rates.bb9) + (rates.h9 + rates.doubles9 + 2*rates.triples9 + 3*rates.hr9);
+  return (rates.h9+rates.bb9)
+    + (rates.h9 + rates.doubles9 + 2*rates.triples9 + 3*rates.hr9)
+    - (rates.k9||0);
 }
 // roughly modern-MLB league-average rates, used only when a pitcher's or
 // team's own season log isn't available yet.
-const LEAGUE_AVG_RATES = { h9:8.7, bb9:3.1, hr9:1.2, doubles9:1.6, triples9:0.15 };
+const LEAGUE_AVG_RATES = { h9:8.7, bb9:3.1, hr9:1.2, doubles9:1.6, triples9:0.15, k9:8.6 };
 // clamp(5 + 4.5*ln(ratio), 0, 10) — 5.0 is exactly par. `invert` flips which
 // direction "doing well" means: a batter wants actual production above
 // expected; a pitcher wants actual allowed below expected.
 function qualityScore(actual, expected, invert=false) {
   if (!(expected>0)) return null;
+  // net production can land at or below zero now that strikeouts subtract —
+  // a lineup that struck out more than it produced sits at the floor of the
+  // scale (and a pitcher who did that to one sits at the ceiling). Without
+  // this guard ln() of a non-positive ratio returns NaN, which reads as a
+  // literal "NaN" in the score cell rather than as a missing value.
+  if (!(actual>0)) return invert ? 10 : 0;
   const ratio = invert ? expected/actual : actual/expected;
   return Math.max(0, Math.min(10, 5 + 4.5*Math.log(ratio)));
 }
@@ -1703,6 +1720,7 @@ function TravelTrends({ tags, setTag, onReady }) {
           pitcherSeasonCache[pid] = {
             h9: Number(stat.hits||0)*27/outs,
             bb9: Number(stat.baseOnBalls||0)*27/outs,
+            k9: Number(stat.strikeOuts||0)*27/outs,
             hr9: Number(stat.homeRuns||0)*27/outs,
             doubles9: Number(stat.doubles||0)*27/outs,
             triples9: Number(stat.triples||0)*27/outs,
@@ -2261,8 +2279,9 @@ function EraNum({ era, verdict, dark }) {
 }
 
 /* one of the team's last 5 games' quality-adjusted batting score (0-10, 5.0
-   = exactly the times-on-base + total-bases production the pitching staff
-   they faced that day would be expected to allow), with the game's actual
+   = exactly the times-on-base + total-bases less strikeouts production the
+   pitching staff they faced that day would be expected to allow), with the
+   game's actual
    hit count in a separate row underneath it (see BattingFive) — two rows of
    5 cells each, rather than 5 independently-sized stacked boxes, so all 5
    scores share one text baseline (and all 5 hit counts share another)
@@ -3384,6 +3403,7 @@ async function loadTeamSeasonHitting(teamId) {
     return {
       h9: Number(stat.hits||0)/gp,
       bb9: Number(stat.baseOnBalls||0)/gp,
+      k9: Number(stat.strikeOuts||0)/gp,
       hr9: Number(stat.homeRuns||0)/gp,
       doubles9: Number(stat.doubles||0)/gp,
       triples9: Number(stat.triples||0)/gp,
@@ -3396,7 +3416,7 @@ async function loadTeamSeasonHitting(teamId) {
 // stand-in. Cached at module scope (a pitcher's season line doesn't change
 // mid-session) since loadPriorGameContext calls this once per pitcher who
 // appeared in every prior game across a whole season log.
-const pitcherSeasonRateCache = {};   // pid -> { h9, bb9, hr9, doubles9, triples9 } | null
+const pitcherSeasonRateCache = {};   // pid -> { h9, bb9, k9, hr9, doubles9, triples9 } | null
 async function loadPitcherSeasonRates(pid) {
   if (!pid) return null;
   if (pid in pitcherSeasonRateCache) return pitcherSeasonRateCache[pid];
@@ -3410,6 +3430,7 @@ async function loadPitcherSeasonRates(pid) {
     return (pitcherSeasonRateCache[pid] = {
       h9: Number(stat.hits||0)*27/outs,
       bb9: Number(stat.baseOnBalls||0)*27/outs,
+      k9: Number(stat.strikeOuts||0)*27/outs,
       hr9: Number(stat.homeRuns||0)*27/outs,
       doubles9: Number(stat.doubles||0)*27/outs,
       triples9: Number(stat.triples||0)*27/outs,
