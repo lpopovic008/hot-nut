@@ -782,8 +782,8 @@ function pitcherSeasonAverages(splits) {
 }
 // colors one pitcher start's IP/H/ER/BB/K line relative to the pitcher's own
 // season pace (or fixed fallback thresholds if no season data exists yet).
-// Shared by PLine's rendering and the pitcher-rematch trend indicator, which
-// counts how many of these came back green vs red for a thumbs up/down.
+// Shared by PLine's rendering and the pitcher-rematch verdict below, which
+// votes on the H/BB/ER subset of these colors.
 function pitcherLineColors(st, season, dark) {
   const col = (good, bad) => good ? C.over : bad ? C.under : (dark ? C.darkText : C.ink);
   const outs = ipToOuts(st.inningsPitched);
@@ -824,6 +824,24 @@ function pitcherLineColors(st, season, dark) {
     kCol = expK!=null ? col(k>=expK+2, k<=expK-2) : col(k>=5, k<=3);
   }
   return { ipCol, hCol, erCol, bbCol, kCol };
+}
+// How a pitcher's last outing against today's opponent graded, as one
+// color-coded verdict for the ERA box. Only hits, walks and earned runs
+// vote — those are
+// the three that say whether the lineup actually got to him. Innings pitched
+// is a usage decision more than a result, and strikeouts can stay high in a
+// start that still got hit hard, so both are left out of the tally.
+//
+// Whichever color outnumbers the other wins outright: 2 green + 1 red reads
+// green. A neutral stat abstains rather than voting for itself, so one green
+// among two unremarkable stats still reads green. Green and red in equal
+// measure — or three neutrals, with nothing to go on — reads blue.
+function rematchVerdictFor(stat, season) {
+  const { hCol, bbCol, erCol } = pitcherLineColors(stat, season);
+  const trio = [hCol, bbCol, erCol];
+  const greens = trio.filter(c => c===C.over).length;
+  const reds   = trio.filter(c => c===C.under).length;
+  return greens>reds ? "up" : reds>greens ? "down" : "even";
 }
 // tags may be an old plain string or the new { text, away, home, date } object
 const tagText = (entry) => !entry ? "" : (typeof entry === "string" ? entry : (entry.text || ""));
@@ -1883,15 +1901,10 @@ function TravelTrends({ tags, setTag, onReady }) {
       // keyed by the PITCHER'S OWN team, so the box lights up in that
       // team's row — not the opponent they're facing again
       rematchTier[teamId] = strong ? "strong" : "weak";
-      // most recent prior start against this opponent: color its IP/H/ER/BB/K
-      // line the same way the pitcher's game log does, and count green vs red
+      // most recent prior start against this opponent, graded on the H/BB/ER
+      // majority (see rematchVerdictFor)
       const mostRecent = facings.reduce((a,b) => b.date > a.date ? b : a);
-      const colors = Object.values(pitcherLineColors(mostRecent.stat, entry.season));
-      const greens = colors.filter(c=>c===C.over).length;
-      const reds = colors.filter(c=>c===C.under).length;
-      // "up"/"down" need a 2+ stat margin — a single green or red stat isn't
-      // a strong enough signal to soft-highlight the ERA box over
-      rematchVerdict[teamId] = (greens-reds)>=2 ? "up" : (reds-greens)>=2 ? "down" : "even";
+      rematchVerdict[teamId] = rematchVerdictFor(mostRecent.stat, entry.season);
     };
     checkRematch(g.awayPid, g.awayId, g.homeId, g.awayPname, g.homeName);
     checkRematch(g.homePid, g.homeId, g.awayId, g.homePname, g.awayName);
@@ -2260,11 +2273,12 @@ function TightDecimal({ text }) {
 }
 
 /* the pitcher's season ERA (unrounded past the hundredth — no border around
-   it, just a soft highlight fill). Soft green fill if they've faced this
-   team already this season and had a clearly good outing (2+ stat margin),
-   soft red if clearly bad, soft grey if they've faced them but it was too
-   close to call either way — the text itself always stays its resting ink
-   color, never tinted green or red. */
+   it, just a soft highlight fill). If they've already faced this team this
+   season, the fill grades that outing on hits/walks/earned runs: soft green
+   when more of the three read good than bad, soft red when more read bad,
+   soft blue when they split evenly or none of them said much either way
+   (see rematchVerdictFor). No fill at all means no prior meeting. The text
+   itself always stays its resting ink color, never tinted. */
 function EraNum({ era, verdict, dark }) {
   const has = era != null;
   const bg = verdict==="up" ? (dark?C.darkSoftOver:C.softOver)
