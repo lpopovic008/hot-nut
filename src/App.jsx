@@ -38,6 +38,9 @@ const C = {
   revenge:"#8B5CF6",       /* neon violet: pitcher facing a team he used to play for */
   shutout:"#1F51FF",       /* neon blue: got blanked, 0 runs last game — shares the Big
                                Day box (opposite extreme, same slot) rather than its own */
+  duel:"#F2FF00",          /* neon yellow: both of tonight's starters are on their third-or-
+                               later look at the lineup across from them. Not a trend-box
+                               slot — it outlines both ERA numbers at once (see StatsAndTrends) */
 };
 const MONO = "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
 const SANS = "system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif";
@@ -1891,6 +1894,7 @@ function TravelTrends({ tags, setTag, onReady }) {
     const rematch = [];
     const rematchTier = {};                       // teamId -> 'strong' | 'weak'
     const rematchVerdict = {};                    // teamId -> 'up' | 'down' | 'even'
+    const rematchCount = {};                      // teamId -> prior meetings vs today's opponent
     const checkRematch = (pid, teamId, oppId, pitcher, oppName) => {
       if (!pid) return;
       const entry = faced[pid];
@@ -1901,6 +1905,9 @@ function TravelTrends({ tags, setTag, onReady }) {
       // keyed by the PITCHER'S OWN team, so the box lights up in that
       // team's row — not the opponent they're facing again
       rematchTier[teamId] = strong ? "strong" : "weak";
+      // how many times he's already seen them — 2+ on BOTH sides is what
+      // draws the neon-yellow outline around the pair of ERA numbers
+      rematchCount[teamId] = facings.length;
       // most recent prior start against this opponent, graded on the H/BB/ER
       // majority (see rematchVerdictFor)
       const mostRecent = facings.reduce((a,b) => b.date > a.date ? b : a);
@@ -2093,6 +2100,7 @@ function TravelTrends({ tags, setTag, onReady }) {
       bigDayKind,
       rematchTier:(tid)=>rematchTier[tid] || null,
       rematchVerdict:(tid)=>rematchVerdict[tid] || null,
+      rematchCount:(tid)=>rematchCount[tid] || 0,
       pitcherEra,
       bigDayStreak,
       shutoutStreak,
@@ -2173,20 +2181,38 @@ function TravelTrends({ tags, setTag, onReady }) {
   );
 }
 
+function LegendRow({ s }) {
+  return (
+    <div style={{ display:"flex", alignItems:"flex-start", gap:6, width:"100%" }}>
+      <span style={{ width:13, height:9, borderRadius:2, flexShrink:0, marginTop:3,
+        background: s.outline ? "transparent" : s.color,
+        boxShadow: s.outline ? `inset 0 0 0 1.5px ${s.color}` : "none" }} />
+      <span style={{ display:"flex", flexDirection:"column", lineHeight:1.25, minWidth:0 }}>
+        <span style={{ fontFamily:MONO, fontSize:10, fontWeight:700, color:C.ink }}>
+          {s.label}{s.yesterday && "*"}</span>
+        <span style={{ fontFamily:SANS, fontSize:10.5, color:C.inkSoft }}>{s.desc}</span>
+      </span>
+    </div>
+  );
+}
+
 function Legend() {
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:6, marginBottom:10 }}>
-      {LEGEND_ROWS.map((s,i)=>(
-        <div key={s.key+i} style={{ display:"flex", alignItems:"flex-start", gap:6, width:"100%" }}>
-          <span style={{ width:13, height:9, borderRadius:2, background:s.color,
-            flexShrink:0, marginTop:3 }} />
-          <span style={{ display:"flex", flexDirection:"column", lineHeight:1.25, minWidth:0 }}>
-            <span style={{ fontFamily:MONO, fontSize:10, fontWeight:700, color:C.ink }}>
-              {s.label}{s.yesterday && "*"}</span>
-            <span style={{ fontFamily:SANS, fontSize:10.5, color:C.inkSoft }}>{s.desc}</span>
+      {/* Big Day and Shutout are the same box lighting up a different color,
+          so they're bracketed together — two loose rows read as two slots. */}
+      <div style={{ display:"flex", gap:7 }}>
+        <span style={{ width:2, borderRadius:1, background:C.ruleDark, flexShrink:0 }} />
+        <div style={{ display:"flex", flexDirection:"column", gap:6, minWidth:0 }}>
+          {SHARED_BOX_ROWS.map(s => <LegendRow key={s.key+s.label} s={s} />)}
+          <span style={{ fontFamily:MONO, fontSize:9, letterSpacing:"0.08em",
+            textTransform:"uppercase", color:C.ruleDark }}>
+            ↑ one box, two colors — a team can never be both
           </span>
         </div>
-      ))}
+      </div>
+      {TREND_SLOTS.slice(1).map(s => <LegendRow key={s.key} s={s} />)}
+      <LegendRow s={DUEL_LEGEND_ENTRY} />
       <div style={{ fontFamily:SANS, fontSize:10, color:C.ruleDark, marginTop:2 }}>
         * Void if the team had an off day yesterday — these are all specifically
         claims about yesterday's game, so there's nothing for them to point at.
@@ -2247,9 +2273,17 @@ const bigDaySlotFor = (kind) => kind==="zero"
 // boxes (see TRENDS_W above); this is just an extra row in the legend list
 // so "what does the blue box mean" has an answer.
 const SHUTOUT_LEGEND_ENTRY = bigDaySlotFor("zero");
-// Big Day, then its opposite-extreme twin Shutout right after it (same box,
-// see bigDaySlotFor above), then the rest of the slots in their normal order.
-const LEGEND_ROWS = [TREND_SLOTS[0], SHUTOUT_LEGEND_ENTRY, ...TREND_SLOTS.slice(1)];
+// Big Day and its opposite-extreme twin Shutout are one box, so the legend
+// renders them as a bracketed pair (see Legend) rather than as two rows that
+// look like two separate slots; everything after them is a slot of its own.
+const SHARED_BOX_ROWS = [TREND_SLOTS[0], SHUTOUT_LEGEND_ENTRY];
+// legend-only, and not a trend box at all: the neon-yellow outline drawn
+// around BOTH ERA numbers when each starter has already faced the lineup
+// across from him 2+ times this season. `outline` renders the swatch as a
+// ring instead of a filled chip, matching how it actually looks on a card.
+const DUEL_LEGEND_ENTRY = { key:"duel", color:C.duel, outline:true,
+  label:"Rematch duel",
+  desc:"Both starters have already faced tonight's opponent 2+ times this season — one outline around both ERA numbers" };
 
 /* a monospace font gives "." the same full character-cell width as a digit,
    which visibly wastes room in these small fixed-width number boxes (badly
@@ -2588,10 +2622,28 @@ function StatsRow({ tid, t, dark }) {
   );
 }
 function StatsAndTrends({ g, t, dark }) {
+  // Both of tonight's starters are on at least their third look at the lineup
+  // across from them. That's a property of the matchup, not of either team, so
+  // it can't live in a per-team trend box — instead one outline stretches down
+  // the ERA column to enclose BOTH numbers at once.
+  //
+  // Each StatsRow is right-aligned, so the ERA cell always sits a fixed
+  // distance in from the right wall: the trend strip, then the 7px gap. The
+  // overlay is placed off that same measurement (widened 2px a side so the
+  // outline clears the digits) and spans the full two-row height.
+  const duel = t.rematchCount(g.awayId)>=2 && t.rematchCount(g.homeId)>=2;
   return (
-    <div style={{ display:"grid", gridTemplateRows:`${MAIN_H}px ${MAIN_H}px` }}>
+    <div style={{ display:"grid", gridTemplateRows:`${MAIN_H}px ${MAIN_H}px`,
+      position:"relative" }}>
       <StatsRow tid={g.awayId} t={t} dark={dark} />
       <StatsRow tid={g.homeId} t={t} dark={dark} />
+      {duel && (
+        <span style={{ position:"absolute", top:1, bottom:1,
+          right:TRENDS_W + 7 - 2, width:ERA_BOX_W + 4,
+          borderRadius:3, pointerEvents:"none",
+          boxShadow:`inset 0 0 0 1.5px ${C.duel}`,
+          transition:"box-shadow 0.4s ease" }} />
+      )}
     </div>
   );
 }
