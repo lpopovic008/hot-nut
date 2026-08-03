@@ -754,19 +754,36 @@ function combinedProduction9(rates) {
 // roughly modern-MLB league-average rates, used only when a pitcher's or
 // team's own season log isn't available yet.
 const LEAGUE_AVG_RATES = { h9:8.7, bb9:3.1, hr9:1.2, doubles9:1.6, triples9:0.15, k9:8.6 };
-// clamp(5 + 4.5*ln(ratio), 0, 10) — 5.0 is exactly par. `invert` flips which
-// direction "doing well" means: a batter wants actual production above
-// expected; a pitcher wants actual allowed below expected.
+// league-average production per nine — the anchor 5.0 sits on
+const PROD_PAR9 = combinedProduction9(LEAGUE_AVG_RATES);
+// roughly one standard deviation of team-game production, and the unit the
+// score is denominated in. Judging by RATIO (the old 5 + 4.5*ln(actual/
+// expected)) worked while par was ~26, but netting strikeouts out dropped it
+// to ~17, small enough that an ordinary cold night divided out to near zero
+// and pinned to the floor — so 0s and 10s crowded out the range between.
+const PROD_SPREAD9 = 9;
+// where 3.0 and 7.0 land, in spreads either side of par
+const SCORE_EDGE = 0.8;
+const SCORE_SLOPE = Math.log(7/3) / SCORE_EDGE;
+
+// 5.0 is exactly par. The GAP between actual and expected production (not
+// their ratio) is measured in spreads and run through a logistic curve, so
+// the thresholds stay exactly where they were — a 0.8-spread shortfall reads
+// 3.0, the same surplus reads 7.0 — while the ends merely approach 0 and 10
+// instead of pinning to them: a brutal night lands near 1, a monster one near
+// 9. Working on the gap also takes a negative `actual` in stride, which a
+// log-ratio could not (strikeouts can push production below zero).
+// `invert` flips which direction "doing well" means: a batter wants
+// production above expectation, a pitcher wants to allow less than it.
 function qualityScore(actual, expected, invert=false) {
   if (!(expected>0)) return null;
-  // net production can land at or below zero now that strikeouts subtract —
-  // a lineup that struck out more than it produced sits at the floor of the
-  // scale (and a pitcher who did that to one sits at the ceiling). Without
-  // this guard ln() of a non-positive ratio returns NaN, which reads as a
-  // literal "NaN" in the score cell rather than as a missing value.
-  if (!(actual>0)) return invert ? 10 : 0;
-  const ratio = invert ? expected/actual : actual/expected;
-  return Math.max(0, Math.min(10, 5 + 4.5*Math.log(ratio)));
+  // the spread grows with how much of a game is being judged, but sublinearly:
+  // production is a sum of many small events, so its swing scales with the
+  // square root of the innings behind it rather than with the innings
+  const spread = PROD_SPREAD9 * Math.sqrt(expected / PROD_PAR9);
+  const gap = invert ? expected-actual : actual-expected;
+  const score = 10 / (1 + Math.exp(-SCORE_SLOPE * gap/spread));
+  return Number.isFinite(score) ? score : null;
 }
 // season-average workload/rate context used to color an individual start:
 // average outs per start, hits/walks per 9 innings, and ERA.
@@ -2228,7 +2245,15 @@ const BOX_W = 14, BOX_H = 13, BOX_GAP = 1.5;
 const ERA_BOX_W = 26;   // "12.34" needs ~24px at this font, hits never do
 const MAIN_H = 19;                         // a team's row height
 const BASES_W = 26;                        // reserved for the live bases display — never shifts
-const CARD_H = 58;
+/* A card and an empty slot MUST come out to the same height, or a column
+   with holes in it drifts out of step with its neighbours — and because the
+   error compounds per hole, a slate with several gaps ends up visibly
+   ragged even though every game is in the correct grid cell. So the height
+   is derived from its parts rather than eyeballed, and CalCard pins itself
+   to it instead of merely setting a minimum. CARD_HEAD_H covers the
+   time/FINAL + ERA-label line (font-size 8 at line-height 1.2 = 9.6). */
+const CARD_HEAD_H = 10, CARD_PAD = 4, CARD_ROW_GAP = 2;
+const CARD_H = CARD_HEAD_H + CARD_ROW_GAP + MAIN_H*2 + CARD_PAD*2 + 2;   // +2 = border
 
 /* fixed situational-trend slots, rendered as a 1x5 row per team (away row on
    top, home row on bottom — matching the Game/Pitcher-Batter sections). add
@@ -2690,7 +2715,7 @@ function CalCard({ g, t, tag, showInd=true, now, onOpen }) {
       role={onOpen ? "button" : undefined} tabIndex={onOpen ? 0 : undefined}
       onKeyDown={onOpen ? (e)=>{ if(e.key==="Enter"||e.key===" "){e.preventDefault();onOpen();} } : undefined}
       style={{ border:`1px solid ${dark?C.darkBorder:C.rule}`, borderRadius:2, boxSizing:"border-box",
-      minHeight:CARD_H, padding:"4px 4px", background:bg, overflow:"visible", position:"relative",
+      height:CARD_H, padding:CARD_PAD, background:bg, overflow:"visible", position:"relative",
       cursor: onOpen ? "pointer" : "default" }}>
       {tagInCorner && (
         <div title={tag} style={{ position:"absolute", top:-4, left:-5, zIndex:3, maxWidth:"86%",
@@ -2719,7 +2744,10 @@ function CalCard({ g, t, tag, showInd=true, now, onOpen }) {
         // exactly fixed regardless of viewport, because that column's own
         // content doesn't shift internally, only its total width does.
         gridTemplateColumns: showInd ? `auto ${BASES_W}px auto` : `max-content ${BASES_W}px`,
-        gridTemplateRows:"auto auto", columnGap:7, rowGap:2 }}>
+        // pinned rather than "auto auto" so the card's height is the sum the
+        // CARD_H constant says it is, whatever the header row happens to hold
+        gridTemplateRows:`${CARD_HEAD_H}px ${MAIN_H*2}px`,
+        columnGap:7, rowGap:CARD_ROW_GAP }}>
         <div style={{ gridColumn:1, gridRow:1 }} />
         {/* the live bases display gets its own column spanning both rows —
             from the FINAL/time row all the way down — instead of being
