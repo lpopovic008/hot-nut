@@ -15,8 +15,8 @@ const C = {
   over:"#1B7F5C", under:"#D7263D", blue:"#2B4C7E",
   softOver:"rgba(27,127,92,0.32)", softUnder:"rgba(215,38,61,0.30)",
   softEven:"rgba(59,130,246,0.28)",
-  /* soft violet, matching the Homecoming Jinx indicator — marks the hitters
-     in the opposing lineup who were once this pitcher's own teammates */
+  /* soft violet — marks a hitter who once played a season alongside the
+     starter he is facing today (see loadTeammateMarks) */
   softRevenge:"rgba(139,92,246,0.32)",
   /* today's-slate dark cells — light text/outline equivalents of ink/inkSoft/
      ruleDark/rule, used only when a card sits on the dark charcoal/navy pair */
@@ -3701,25 +3701,28 @@ async function loadTeamSeasons(personId, group) {
   } catch { return (teamSeasonCache[key] = null); }
 }
 
-/* Which hitters in a jinxed pitcher's opposition once shared a clubhouse with
-   him. Returns { [lineupTeamId]: Set(playerId) }, keyed by the team whose
-   lineup is being marked — a game can in principle have a jinx on both sides.
-   Only ever called from an open modal, and only when a jinx is actually
-   present, so the career fetches are never paid for otherwise. */
-async function loadJinxTeammates(jinxes, lineupFor) {
+/* Which hitters in a lineup once shared a clubhouse with the pitcher they are
+   about to face. Takes one entry per side — { key, pitcherId, players } — and
+   returns { [key]: Set(playerId) }, so both lineups are marked against their
+   own opposing starter in a single pass.
+
+   Only ever called from an open modal: a career history per hitter is far too
+   many requests to spend on a calendar the viewer is only scanning. Both sides
+   run together and loadTeamSeasons caches per player, so arrowing through a
+   series re-uses nearly everything it already fetched. */
+async function loadTeammateMarks(pairs) {
   const out = {};
-  for (const j of jinxes) {
-    const players = lineupFor(j.oppId);
-    if (!players?.length) continue;
-    const pitcherSeasons = await loadTeamSeasons(j.pid, "pitching");
-    if (!pitcherSeasons?.size) continue;
+  await Promise.all(pairs.map(async ({ key, pitcherId, players }) => {
+    if (!pitcherId || !players?.length) return;
+    const pitcherSeasons = await loadTeamSeasons(pitcherId, "pitching");
+    if (!pitcherSeasons?.size) return;
     const mates = new Set();
     await mapPool(players, 4, async (pl) => {
       const seasons = await loadTeamSeasons(pl.id, "hitting");
       if (seasons && [...seasons].some(k => pitcherSeasons.has(k))) mates.add(pl.id);
     });
-    out[j.oppId] = mates;
-  }
+    out[key] = mates;
+  }));
   return out;
 }
 
@@ -3772,9 +3775,9 @@ async function loadBatterVs(batterId, pitcherId) {
 // name strip rather than in a single grid together).
 const VS_STAT_COLS = "20px 16px 16px 32px";   // AB H HR AVG
 function TeamPanel({ lineup, oppName, pitcherName, pitcherId, era, battingLine, onStat, oppPitcherName, oppPitcherId, oppTeamId, date, showBoxPitching, boxPitchers, col, mates }) {
-  // a hitter who once shared a clubhouse with today's jinxed starter
+  // a hitter who once shared a clubhouse with the starter he's facing today
   const wasMate = (id) => !!mates?.has(id);
-  const MATE_TITLE = "Was a teammate of today's opposing starter";
+  const MATE_TITLE = "Played a season alongside today's opposing starter";
   const canVs = !!oppPitcherId && !!oppPitcherName;
   // the manually-added "bulk pitcher" (see AddPitcherBlock) is controlled
   // here, not inside that component, so it can also unlock its own
@@ -3934,14 +3937,19 @@ function TeamPanel({ lineup, oppName, pitcherName, pitcherId, era, battingLine, 
             return (
             <div key={p.id} style={{ display:"grid", gridTemplateColumns:ROW_COLS, gap:6,
               padding:"3px 10px", alignItems:"center", borderTop:`1px solid #EEF0F2` }}>
-              {/* the jinx tie-in is the rarer signal and the reason this
-                  lineup is being read at all, so it takes the highlight when
-                  a hitter is both a former teammate and hot */}
+              {/* now that the teammate mark applies to every game, both can
+                  land on the same hitter — the fill goes to the teammate tie
+                  and the streak keeps a yellow underline rather than being
+                  silently overwritten */}
               <span style={{ fontFamily:SANS, fontSize:12.5, whiteSpace:"nowrap",
-                overflow:"hidden", textOverflow:"ellipsis",
+                overflow:"hidden", textOverflow:"ellipsis", borderRadius:1,
                 background: wasMate(p.id) ? C.softRevenge
-                  : hot ? "rgba(255,233,77,0.5)" : "transparent", borderRadius:1 }}
-                title={wasMate(p.id) ? `${p.name} — ${MATE_TITLE}` : p.name}>
+                  : hot ? "rgba(255,233,77,0.5)" : "transparent",
+                boxShadow: wasMate(p.id) && hot
+                  ? `inset 0 -2px 0 ${C.markerDeep}` : "none" }}
+                title={wasMate(p.id)
+                  ? `${p.name} — ${MATE_TITLE}${hot ? " · also on a hitting streak" : ""}`
+                  : p.name}>
                 <span className="ts-hitter-full">{p.name}</span>
                 <span className="ts-hitter-abbr">{abbrevName(p.name)}</span>
               </span>
@@ -4161,7 +4169,7 @@ function GameModal({ m, tags, setTag, now, onClose, ensureBattingLine }) {
   const [homeLU, setHomeLU] = useState(null);
   const [h2h,    setH2H]    = useState(undefined);
   const [h2hOpen, setH2hOpen] = useState(false);
-  const [jinxMates, setJinxMates] = useState(null);   // lineup teamId -> Set(playerId)
+  const [teammateMarks, setTeammateMarks] = useState(null);   // lineup teamId -> Set(playerId)
   const [pick,   setPick]   = useState(null);   // {name, stat, ts} -> prop analyzer
   // live/finished games show the game's actual box score (line score by
   // inning, and the actual pitching line) instead of pre-game previews. MLB's
@@ -4269,24 +4277,29 @@ function GameModal({ m, tags, setTag, now, onClose, ensureBattingLine }) {
     return () => { alive = false; };
   }, [g, date]);
 
-  // When this game carries a Homecoming Jinx, mark the hitters in the lineup
-  // he used to play alongside. Waits on the lineups (nothing to mark until
-  // they land) and runs only for a jinx game, so an ordinary game never pays
-  // for the career fetches. Re-running as each side's lineup arrives is cheap
-  // — loadTeamSeasons caches per player.
+  // Mark the hitters on each side who once played alongside the starter they
+  // are facing. Each lineup is paired with the OTHER side's pitcher, which is
+  // the same relationship the Homecoming Jinx version marked — it just no
+  // longer waits for a jinx to be present. Waits on the lineups, since there
+  // is nothing to mark until they land, and re-running as the second side
+  // arrives is cheap because loadTeamSeasons caches per player.
   useEffect(() => {
-    const jinxes = t?.formerTeam || [];
-    if (!jinxes.length) return;
+    const pairs = [];
+    if (awayLU?.players?.length && g.homePid)
+      pairs.push({ key:g.awayId, pitcherId:g.homePid, players:awayLU.players });
+    if (homeLU?.players?.length && g.awayPid)
+      pairs.push({ key:g.homeId, pitcherId:g.awayPid, players:homeLU.players });
+    if (!pairs.length) return;
     let alive = true;
-    loadJinxTeammates(jinxes, (teamId) =>
-      teamId===g.awayId ? awayLU?.players : teamId===g.homeId ? homeLU?.players : null
-    ).then(byTeam => { if (alive) setJinxMates({ gamePk:g.gamePk, byTeam }); }).catch(()=>{});
+    loadTeammateMarks(pairs)
+      .then(byTeam => { if (alive) setTeammateMarks({ gamePk:g.gamePk, byTeam }); })
+      .catch(()=>{});
     return () => { alive = false; };
-  }, [t, g.gamePk, g.awayId, g.homeId, awayLU, homeLU]);
+  }, [g.gamePk, g.awayId, g.homeId, g.awayPid, g.homePid, awayLU, homeLU]);
   // tagged with the game it was built for, so arrowing to the next game shows
   // nothing rather than briefly carrying the previous game's marks across
   const matesFor = (teamId) =>
-    jinxMates?.gamePk === g.gamePk ? jinxMates.byTeam?.[teamId] : undefined;
+    teammateMarks?.gamePk === g.gamePk ? teammateMarks.byTeam?.[teamId] : undefined;
 
   // arrow keys navigate between the day's games
   useEffect(() => {
