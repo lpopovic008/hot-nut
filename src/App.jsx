@@ -15,6 +15,9 @@ const C = {
   over:"#1B7F5C", under:"#D7263D", blue:"#2B4C7E",
   softOver:"rgba(27,127,92,0.32)", softUnder:"rgba(215,38,61,0.30)",
   softEven:"rgba(59,130,246,0.28)",
+  /* soft violet, matching the Homecoming Jinx indicator — marks the hitters
+     in the opposing lineup who were once this pitcher's own teammates */
+  softRevenge:"rgba(139,92,246,0.32)",
   /* today's-slate dark cells — light text/outline equivalents of ink/inkSoft/
      ruleDark/rule, used only when a card sits on the dark charcoal/navy pair */
   darkText:"#F2F4F7", darkTextSoft:"#AEB7C4", darkOutline:"#57616F", darkBorder:"#3A4250",
@@ -3676,6 +3679,50 @@ async function loadBoxscorePitchers(gamePk, settled=false) {
   } catch { return null; }
 }
 
+/* Every MLB team-season a player logged, as "teamId:season" keys. Two players
+   sharing one of these keys were on the same club in the same year — actual
+   teammates — which is what the Homecoming Jinx lineup highlight keys off.
+   Cached per person: a career history can't change mid-session. */
+const teamSeasonCache = {};
+async function loadTeamSeasons(personId, group) {
+  if (!personId) return null;
+  const key = `${personId}:${group}`;
+  if (key in teamSeasonCache) return teamSeasonCache[key];
+  try {
+    const r = await fetch(`${API}/people/${personId}/stats` +
+      `?stats=yearByYear&group=${group}&sportId=1`);
+    if (!r.ok) return (teamSeasonCache[key] = null);
+    const j = await r.json();
+    const out = new Set();
+    (j.stats?.[0]?.splits || []).forEach(s => {
+      if (s.team?.id != null && s.season != null) out.add(`${s.team.id}:${s.season}`);
+    });
+    return (teamSeasonCache[key] = out);
+  } catch { return (teamSeasonCache[key] = null); }
+}
+
+/* Which hitters in a jinxed pitcher's opposition once shared a clubhouse with
+   him. Returns { [lineupTeamId]: Set(playerId) }, keyed by the team whose
+   lineup is being marked — a game can in principle have a jinx on both sides.
+   Only ever called from an open modal, and only when a jinx is actually
+   present, so the career fetches are never paid for otherwise. */
+async function loadJinxTeammates(jinxes, lineupFor) {
+  const out = {};
+  for (const j of jinxes) {
+    const players = lineupFor(j.oppId);
+    if (!players?.length) continue;
+    const pitcherSeasons = await loadTeamSeasons(j.pid, "pitching");
+    if (!pitcherSeasons?.size) continue;
+    const mates = new Set();
+    await mapPool(players, 4, async (pl) => {
+      const seasons = await loadTeamSeasons(pl.id, "hitting");
+      if (seasons && [...seasons].some(k => pitcherSeasons.has(k))) mates.add(pl.id);
+    });
+    out[j.oppId] = mates;
+  }
+  return out;
+}
+
 async function loadH2H(aId, bId) {
   const r = await fetch(`${API}/schedule?sportId=1&season=${SEASON}&gameType=R&teamId=${aId}&hydrate=linescore`);
   if (!r.ok) throw new Error(`schedule ${r.status}`);
@@ -3724,7 +3771,10 @@ async function loadBatterVs(batterId, pitcherId) {
 // where these columns sit fixed to the right of a horizontally-scrollable
 // name strip rather than in a single grid together).
 const VS_STAT_COLS = "20px 16px 16px 32px";   // AB H HR AVG
-function TeamPanel({ lineup, oppName, pitcherName, pitcherId, era, battingLine, onStat, oppPitcherName, oppPitcherId, oppTeamId, date, showBoxPitching, boxPitchers, col }) {
+function TeamPanel({ lineup, oppName, pitcherName, pitcherId, era, battingLine, onStat, oppPitcherName, oppPitcherId, oppTeamId, date, showBoxPitching, boxPitchers, col, mates }) {
+  // a hitter who once shared a clubhouse with today's jinxed starter
+  const wasMate = (id) => !!mates?.has(id);
+  const MATE_TITLE = "Was a teammate of today's opposing starter";
   const canVs = !!oppPitcherId && !!oppPitcherName;
   // the manually-added "bulk pitcher" (see AddPitcherBlock) is controlled
   // here, not inside that component, so it can also unlock its own
@@ -3884,10 +3934,14 @@ function TeamPanel({ lineup, oppName, pitcherName, pitcherId, era, battingLine, 
             return (
             <div key={p.id} style={{ display:"grid", gridTemplateColumns:ROW_COLS, gap:6,
               padding:"3px 10px", alignItems:"center", borderTop:`1px solid #EEF0F2` }}>
+              {/* the jinx tie-in is the rarer signal and the reason this
+                  lineup is being read at all, so it takes the highlight when
+                  a hitter is both a former teammate and hot */}
               <span style={{ fontFamily:SANS, fontSize:12.5, whiteSpace:"nowrap",
                 overflow:"hidden", textOverflow:"ellipsis",
-                background: hot ? "rgba(255,233,77,0.5)" : "transparent", borderRadius:1 }}
-                title={p.name}>
+                background: wasMate(p.id) ? C.softRevenge
+                  : hot ? "rgba(255,233,77,0.5)" : "transparent", borderRadius:1 }}
+                title={wasMate(p.id) ? `${p.name} — ${MATE_TITLE}` : p.name}>
                 <span className="ts-hitter-full">{p.name}</span>
                 <span className="ts-hitter-abbr">{abbrevName(p.name)}</span>
               </span>
@@ -3908,11 +3962,15 @@ function TeamPanel({ lineup, oppName, pitcherName, pitcherId, era, battingLine, 
           <div style={{ display:"flex", gap:4, padding:"0 10px" }}>
             <div className="ts-vs-names-scroll" style={{ flex:"1 1 auto", minWidth:0, overflowX:"auto" }}>
               {lineup.players.map(p=>(
-                <div key={p.id} title={p.name} style={{ whiteSpace:"nowrap", padding:"3px 0",
+                <div key={p.id} title={wasMate(p.id) ? `${p.name} — ${MATE_TITLE}` : p.name}
+                  style={{ whiteSpace:"nowrap", padding:"3px 0",
                   height:18, lineHeight:"18px", borderTop:`1px solid #EEF0F2`,
                   fontFamily:SANS, fontSize:12.5 }}>
-                  <span className="ts-hitter-full">{p.name}</span>
-                  <span className="ts-hitter-abbr">{abbrevName(p.name)}</span>
+                  <span style={{ background: wasMate(p.id) ? C.softRevenge : "transparent",
+                    borderRadius:1 }}>
+                    <span className="ts-hitter-full">{p.name}</span>
+                    <span className="ts-hitter-abbr">{abbrevName(p.name)}</span>
+                  </span>
                 </div>
               ))}
             </div>
@@ -4103,6 +4161,7 @@ function GameModal({ m, tags, setTag, now, onClose, ensureBattingLine }) {
   const [homeLU, setHomeLU] = useState(null);
   const [h2h,    setH2H]    = useState(undefined);
   const [h2hOpen, setH2hOpen] = useState(false);
+  const [jinxMates, setJinxMates] = useState(null);   // lineup teamId -> Set(playerId)
   const [pick,   setPick]   = useState(null);   // {name, stat, ts} -> prop analyzer
   // live/finished games show the game's actual box score (line score by
   // inning, and the actual pitching line) instead of pre-game previews. MLB's
@@ -4209,6 +4268,25 @@ function GameModal({ m, tags, setTag, now, onClose, ensureBattingLine }) {
     }
     return () => { alive = false; };
   }, [g, date]);
+
+  // When this game carries a Homecoming Jinx, mark the hitters in the lineup
+  // he used to play alongside. Waits on the lineups (nothing to mark until
+  // they land) and runs only for a jinx game, so an ordinary game never pays
+  // for the career fetches. Re-running as each side's lineup arrives is cheap
+  // — loadTeamSeasons caches per player.
+  useEffect(() => {
+    const jinxes = t?.formerTeam || [];
+    if (!jinxes.length) return;
+    let alive = true;
+    loadJinxTeammates(jinxes, (teamId) =>
+      teamId===g.awayId ? awayLU?.players : teamId===g.homeId ? homeLU?.players : null
+    ).then(byTeam => { if (alive) setJinxMates({ gamePk:g.gamePk, byTeam }); }).catch(()=>{});
+    return () => { alive = false; };
+  }, [t, g.gamePk, g.awayId, g.homeId, awayLU, homeLU]);
+  // tagged with the game it was built for, so arrowing to the next game shows
+  // nothing rather than briefly carrying the previous game's marks across
+  const matesFor = (teamId) =>
+    jinxMates?.gamePk === g.gamePk ? jinxMates.byTeam?.[teamId] : undefined;
 
   // arrow keys navigate between the day's games
   useEffect(() => {
@@ -4405,7 +4483,7 @@ function GameModal({ m, tags, setTag, now, onClose, ensureBattingLine }) {
             pitcher box on one side never pushes that side's batting-five or
             lineup out of line with the other side's. */}
         <div className="ts-lineups" style={{ gap:0 }}>
-          <TeamPanel oppName={g.homeName} col={1}
+          <TeamPanel oppName={g.homeName} col={1} mates={matesFor(g.awayId)}
             lineup={awayLU} pitcherName={g.awayPname} pitcherId={g.awayPid}
             oppPitcherName={g.homePname} oppPitcherId={g.homePid}
             oppTeamId={g.homeId} date={date} era={t ? t.pitcherEra(g.awayId) : null}
@@ -4413,7 +4491,7 @@ function GameModal({ m, tags, setTag, now, onClose, ensureBattingLine }) {
             showBoxPitching={showBoxPitching} boxPitchers={boxPitching?.away}
             onStat={(name,stat)=>setPick({ name, stat, ts:Date.now() })} />
           <div style={{ gridColumn:2, gridRow:"1 / span 3", background:C.rule }} />
-          <TeamPanel oppName={g.awayName} col={3}
+          <TeamPanel oppName={g.awayName} col={3} mates={matesFor(g.homeId)}
             lineup={homeLU} pitcherName={g.homePname} pitcherId={g.homePid}
             oppPitcherName={g.awayPname} oppPitcherId={g.awayPid}
             oppTeamId={g.awayId} date={date} era={t ? t.pitcherEra(g.homeId) : null}
