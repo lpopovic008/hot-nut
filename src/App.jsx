@@ -1615,6 +1615,7 @@ function TravelTrends({ tags, setTag, onReady }) {
         const gd = g.officialDate || g.gameDate.slice(0,10);
         return gd === yISO || gd === start;
       });
+      const comebackTask = (async () => {
       const cbResults = await mapPool(yGames, 4, async (g) => {
         const winnerSide = g.teams.home.isWinner ? "home" : "away";
         const gd = g.officialDate || g.gameDate.slice(0,10);
@@ -1642,6 +1643,7 @@ function TravelTrends({ tags, setTag, onReady }) {
       });
       const cbList = cbResults.filter(Boolean).sort((a,b)=>b.inning-a.inning);
       setComebacks(cbList);
+      })();
 
       /* ── pitcher rematch: has each probable already faced today's opponent? ── */
       const pitcherIds = new Set();
@@ -1649,8 +1651,15 @@ function TravelTrends({ tags, setTag, onReady }) {
         if (g.awayPid) pitcherIds.add(g.awayPid);
         if (g.homePid) pitcherIds.add(g.homePid);
       });
+      // These three phases share nothing, so they run together and each
+      // publishes the moment its OWN data lands rather than waiting on the
+      // slowest. That matters most for `faced`: it feeds the ERA number, the
+      // rematch verdict and the gauntlet, and it used to sit finished but
+      // unpublished while the yearByYear fetch for Homecoming Jinx — which
+      // nothing on that path needs — ran to completion behind it.
+      const facedTask = (async () => {
       const facedMap = {};
-      await mapPool([...pitcherIds], 4, async (pid)=>{
+      await mapPool([...pitcherIds], 6, async (pid)=>{
         try {
           const pr = await fetch(`${API}/people/${pid}/stats` +
             `?stats=gameLog&group=pitching&season=${SEASON}&gameType=R`);
@@ -1669,6 +1678,10 @@ function TravelTrends({ tags, setTag, onReady }) {
           facedMap[pid] = { list, season: pitcherSeasonAverages(splits) };
         } catch { /* leave unset */ }
       });
+      // rematch/gauntlet boxes and the season-ERA number all read from this
+      setFaced(facedMap);
+      })();
+
       /* ── former team ("Homecoming Jinx"): has each probable spent 2+
          separate seasons pitching for the team he's facing today (a real
          tenure, not just a rental half-season or a mid-year rental the
@@ -1677,8 +1690,9 @@ function TravelTrends({ tags, setTag, onReady }) {
          distinct from the in-season rematch above. Not called "revenge
          game": facing a former team is typically a bad outing for the
          pitcher, not a good one. ── */
+      const formerTask = (async () => {
       const formerTeamMap = {};
-      await mapPool([...pitcherIds], 4, async (pid)=>{
+      await mapPool([...pitcherIds], 6, async (pid)=>{
         try {
           const pr = await fetch(`${API}/people/${pid}/stats?stats=yearByYear&group=pitching&sportId=1`);
           if (!pr.ok) return;
@@ -1696,11 +1710,12 @@ function TravelTrends({ tags, setTag, onReady }) {
           formerTeamMap[pid] = teams;
         } catch { /* leave unset */ }
       });
-      // rematch/gauntlet/revenge-game boxes and the season-ERA number all
-      // read from `faced` — light them up now, before the slower box-score
-      // fetch below (the BAT trio's data source) even starts
-      setFaced(facedMap);
       setFormerTeams(formerTeamMap);
+      })();
+
+      // the calendar is already interactive; this only marks the window
+      // fully loaded once every indicator has published
+      await Promise.all([comebackTask, facedTask, formerTask]);
       // the quality-adjusted batting score (the BAT number shown in a
       // game's modal) is NOT fetched here — it needs a further box-score
       // fetch per game plus a pitcher season-rate fetch per pitcher
@@ -1738,7 +1753,8 @@ function TravelTrends({ tags, setTag, onReady }) {
       if (!gamePkSet.size) return;
       const boxCache = {};   // gamePk -> { away:[{pid,name,stat}], home:[...] }
       await mapPool([...gamePkSet], 4, async (gamePk) => {
-        const bx = await loadBoxscorePitchers(gamePk);
+        // every game reaching here came off the completed-games list
+        const bx = await loadBoxscorePitchers(gamePk, true);
         if (bx) boxCache[gamePk] = bx;
       });
       const pitcherSeasonCache = {};   // pid -> { h9, bb9, hr9, doubles9, triples9 }
@@ -1903,7 +1919,7 @@ function TravelTrends({ tags, setTag, onReady }) {
   }, [load, busy, onReady, slateCopied, days, tags, modal, showIndicators, anchor]);
 
   /* which trends touch a game, attributed to the specific team they apply to */
-  const gameTrends = (date, g) => {
+  const computeGameTrends = (date, g) => {
     const echo = (echoes||[]).filter(e=>e.date===date &&
       (e.teamId===g.homeId || e.teamId===g.awayId));
     const cb = (comebacks||[]).filter(c=>c.next && c.next.date===date &&
@@ -2122,6 +2138,33 @@ function TravelTrends({ tags, setTag, onReady }) {
       bigDayStreak,
       shutoutStreak,
       hitsLine };
+  };
+
+  // computeGameTrends walks every trend list for one game and hands back a
+  // bundle of closures, and it gets called for every visible game — and again
+  // for every game of the open day, on every render. None of it depends on
+  // the clock, so without a cache the 60-second `now` tick alone redid the
+  // whole slate. The cache is rebuilt (identity changes) exactly when one of
+  // the underlying data sets does, so a freshly-published indicator still
+  // shows up immediately.
+  // Cached per data generation: the moment any input identity changes, every
+  // bundle built from the old one is stale, so the whole map is dropped and
+  // refilled lazily. That keeps a newly-published indicator appearing at once
+  // while a bare clock tick costs nothing.
+  const trendCacheRef = useRef({ inputs:null, map:new Map() });
+  const trendInputs = [echoes, comebacks, faced, formerTeams, runsMap, hitsMap,
+    oppMap, scheduleMap, battingScoreMap, start, westThreshold];
+  const prevInputs = trendCacheRef.current.inputs;
+  if (!prevInputs || trendInputs.some((v,i) => v !== prevInputs[i]))
+    trendCacheRef.current = { inputs:trendInputs, map:new Map() };
+
+  const gameTrends = (date, g) => {
+    const cache = trendCacheRef.current.map;
+    const key = `${date}|${g.gamePk}`;
+    if (cache.has(key)) return cache.get(key);
+    const out = computeGameTrends(date, g);
+    cache.set(key, out);
+    return out;
   };
 
   return (
@@ -3603,8 +3646,14 @@ async function loadLineScore(gamePk) {
 
 // every pitcher who has appeared in this game so far, in order, with their
 // current line (live games update as it goes; finished games are final).
-async function loadBoxscorePitchers(gamePk) {
+// A FINAL game's box score is frozen, so it's worth keeping — arrowing back
+// and forth through a day's games otherwise re-fetches the same one every
+// time. Callers pass `settled` only for games that have actually finished; a
+// live game is never cached, since its line is still moving.
+const boxscorePitcherCache = {};   // gamePk -> parsed box
+async function loadBoxscorePitchers(gamePk, settled=false) {
   if (!gamePk) return null;
+  if (settled && boxscorePitcherCache[gamePk]) return boxscorePitcherCache[gamePk];
   try {
     const r = await fetch(`${API}/game/${gamePk}/boxscore`);
     if (!r.ok) return null;
@@ -3621,7 +3670,9 @@ async function loadBoxscorePitchers(gamePk) {
         return { pid, name: p.person?.fullName, stat };
       }).filter(Boolean);
     };
-    return { away: side(j.teams?.away), home: side(j.teams?.home) };
+    const out = { away: side(j.teams?.away), home: side(j.teams?.home) };
+    if (settled) boxscorePitcherCache[gamePk] = out;
+    return out;
   } catch { return null; }
 }
 
@@ -4136,26 +4187,26 @@ function GameModal({ m, tags, setTag, now, onClose, ensureBattingLine }) {
     // picks up the actual in-progress stats without needing to be reopened.
     if (final || live) {
       loadLineScore(g.gamePk).then(r=>{ if(alive) setLs(r); });
-      loadBoxscorePitchers(g.gamePk).then(r=>{ if(alive) setBoxPitching(r); });
+      loadBoxscorePitchers(g.gamePk, final).then(r=>{ if(alive) setBoxPitching(r); });
     }
     return () => { alive = false; };
   }, [g.gamePk, final, live]);
 
   useEffect(() => {
     let alive = true;
-    (async () => {
-      // H2H summary (top-of-modal overview)
-      try { const s = await loadH2H(g.awayId, g.homeId); if(alive) setH2H(s); }
-      catch { if(alive) setH2H(null); }
-      // lineups + per-batter trends
-      for (const side of ["away","home"]) {
-        loadLineup(g._raw, side, date).then(async lu=>{
-          const players = await mapPool(lu.players, 4, async pl=>({ ...pl, ...(await loadBatterTrend(pl.id, date)) }));
-          if(!alive) return;
-          (side==="away"?setAwayLU:setHomeLU)({ ...lu, players });
-        });
-      }
-    })();
+    // The head-to-head strip sits at the very bottom of the modal while the
+    // lineups are its main body, so these run alongside each other rather
+    // than making the body wait on a summary the viewer has to scroll to.
+    loadH2H(g.awayId, g.homeId)
+      .then(s => { if(alive) setH2H(s); })
+      .catch(() => { if(alive) setH2H(null); });
+    for (const side of ["away","home"]) {
+      loadLineup(g._raw, side, date).then(async lu=>{
+        const players = await mapPool(lu.players, 4, async pl=>({ ...pl, ...(await loadBatterTrend(pl.id, date)) }));
+        if(!alive) return;
+        (side==="away"?setAwayLU:setHomeLU)({ ...lu, players });
+      });
+    }
     return () => { alive = false; };
   }, [g, date]);
 
