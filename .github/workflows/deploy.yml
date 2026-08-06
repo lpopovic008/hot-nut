@@ -10,14 +10,19 @@ permissions:
   pages: write
   id-token: write
 
-# Only one deploy at a time; cancel older in-progress runs.
+# One deploy at a time, but do NOT cancel one that's already running: a
+# publish that's mid-flight should be allowed to finish, and cancelling was
+# killing deploys that were only waiting their turn for a runner. Newer
+# QUEUED runs still supersede older queued ones, so nothing piles up — this
+# matches GitHub's own recommended setting for Pages deployments.
 concurrency:
   group: pages
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -32,9 +37,19 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
         uses: actions/deploy-pages@v4
+        with:
+          # deploy-pages polls the Pages backend and aborts after 10 minutes by
+          # default. Deployments have been sitting in `deployment_queued` past
+          # that and getting cancelled seconds-to-minutes before they'd have
+          # landed, so give the backend room instead of throwing the publish
+          # away. 30 min of polling, inside a 45 min job ceiling.
+          timeout: 1800000
+          # a single transient API blip shouldn't end the whole publish
+          error_count: 20
