@@ -287,7 +287,7 @@ function buildSdqlRows(games) {
     const innings = ls.innings || [];
     const mk = (me, opp, siteName, key) => ({
       gamePk: g.gamePk, date, dateNum: Number(date.replace(/-/g,"")),
-      season: SEASON, month: Number(date.slice(5,7)), day: Number(date.slice(8,10)),
+      season: Number(date.slice(0,4)), month: Number(date.slice(5,7)), day: Number(date.slice(8,10)),
       dow: new Date(`${date}T12:00:00`).getDay(),
       team: me.name, teamId: me.id, oTeam: opp.name, oTeamId: opp.id,
       site: siteName, runs: me.score, hits: me.hits, errors: me.errors,
@@ -320,13 +320,19 @@ function buildSdqlRows(games) {
     else { rows[i]._opp = pair; rows[pair]._opp = i; }
   });
 
-  // chronological chain per team, which also yields rest days and the
-  // win/loss streak the team carried INTO each game (not out of it)
+  // Chronological chain per team, which also yields rest days and the win/loss
+  // streak the team carried INTO each game (not out of it).
+  //
+  // Every chain below is keyed by team-and-SEASON, not team alone. With more
+  // than one season loaded, a continuous chain would make Opening Day's `p:`
+  // point at last October's finale — five months and a roster overhaul later —
+  // and hand it a `rest` of ~150 days. Each season starts clean instead.
   const byTeam = new Map();
   rows.forEach((r,i) => {
     if (r.teamId==null) return;
-    if (!byTeam.has(r.teamId)) byTeam.set(r.teamId, []);
-    byTeam.get(r.teamId).push(i);
+    const key = `${r.teamId}|${r.season}`;
+    if (!byTeam.has(key)) byTeam.set(key, []);
+    byTeam.get(key).push(i);
   });
   byTeam.forEach(idxs => {
     let streak = 0;
@@ -350,9 +356,10 @@ function buildSdqlRows(games) {
   const byStarter = new Map();
   rows.forEach((r,i) => {
     if (r.starterId==null) return;
-    const prev = byStarter.get(r.starterId);
+    const key = `${r.starterId}|${r.season}`;
+    const prev = byStarter.get(key);
     if (prev!=null) r._sprev = prev;
-    byStarter.set(r.starterId, i);
+    byStarter.set(key, i);
   });
 
   // how many times this starter has ALREADY faced tonight's opponent this
@@ -363,7 +370,7 @@ function buildSdqlRows(games) {
   const meetings = new Map();
   rows.forEach(r => {
     if (r.starterId==null || r.oTeamId==null) return;
-    const key = `${r.starterId}|${r.oTeamId}`;
+    const key = `${r.starterId}|${r.oTeamId}|${r.season}`;
     const seen = meetings.get(key) || 0;
     r.smeetings = seen;
     meetings.set(key, seen+1);
@@ -372,32 +379,55 @@ function buildSdqlRows(games) {
   return rows;
 }
 
-// the whole season is one fetch per month so the responses stay small and
-// the progress counter has something to report; cached for the session
-// because a second query should be instant.
-let sdqlSeasonCache = null;
-function loadSdqlSeason(onProgress) {
-  if (sdqlSeasonCache) return sdqlSeasonCache;
-  sdqlSeasonCache = (async () => {
-    const spans = [[3,1,3,31],[4,1,4,30],[5,1,5,31],[6,1,6,30],
-      [7,1,7,31],[8,1,8,31],[9,1,9,30],[10,1,10,31]];
-    const pad = (n) => String(n).padStart(2,"0");
-    const games = [];
-    let done = 0;
-    for (const [m1,d1,m2,d2] of spans) {
-      const r = await fetch(`${API}/schedule?sportId=1&gameType=R` +
-        `&startDate=${SEASON}-${pad(m1)}-${pad(d1)}&endDate=${SEASON}-${pad(m2)}-${pad(d2)}` +
-        `&hydrate=linescore,probablePitcher`);
-      if (!r.ok) throw new Error(`schedule ${r.status}`);
-      const j = await r.json();
-      (j.dates||[]).forEach(d => (d.games||[]).forEach(g => games.push(g)));
-      onProgress?.(++done, spans.length);
-    }
-    return buildSdqlRows(games);
-  })();
-  // a failed load must not poison every later attempt
-  sdqlSeasonCache.catch(() => { sdqlSeasonCache = null; });
-  return sdqlSeasonCache;
+// A season arrives as one fetch per month rather than one for the whole year:
+// the responses stay small enough to be reliable, and the months run together
+// instead of in a queue. Raw games are cached per season — widening a range
+// only pays for the years that weren't already loaded.
+const SDQL_SPANS = [[3,1,3,31],[4,1,4,30],[5,1,5,31],[6,1,6,30],
+  [7,1,7,31],[8,1,8,31],[9,1,9,30],[10,1,10,31]];
+const SDQL_FIRST_SEASON = 2000;   // linescore detail is dependable from here on
+const sdqlGamesBySeason = {};     // year -> Promise<game[]>
+function loadSdqlGames(year) {
+  if (!sdqlGamesBySeason[year]) {
+    sdqlGamesBySeason[year] = (async () => {
+      const pad = (n) => String(n).padStart(2,"0");
+      const chunks = await mapPool(SDQL_SPANS, 4, async ([m1,d1,m2,d2]) => {
+        const r = await fetch(`${API}/schedule?sportId=1&gameType=R` +
+          `&startDate=${year}-${pad(m1)}-${pad(d1)}&endDate=${year}-${pad(m2)}-${pad(d2)}` +
+          `&hydrate=linescore,probablePitcher`);
+        if (!r.ok) throw new Error(`schedule ${r.status}`);
+        const j = await r.json();
+        const out = [];
+        (j.dates||[]).forEach(d => (d.games||[]).forEach(g => out.push(g)));
+        return out;
+      });
+      return chunks.flat();
+    })();
+    // a failed year must not poison every later attempt
+    sdqlGamesBySeason[year].catch(() => { delete sdqlGamesBySeason[year]; });
+  }
+  return sdqlGamesBySeason[year];
+}
+
+// Rows for a whole span of seasons, memoized on the span itself so re-running
+// a query against the same years is instant. Two seasons load at a time: any
+// more and the browser's own connection limit just queues them anyway.
+let sdqlRowsCache = { key:null, rows:null };
+async function loadSdqlSeasons(from, to, onProgress) {
+  const years = [];
+  for (let y=Math.min(from,to); y<=Math.max(from,to); y++) years.push(y);
+  const key = years.join(",");
+  if (sdqlRowsCache.key === key) return sdqlRowsCache.rows;
+  let done = 0;
+  onProgress?.(0, years.length);
+  const perYear = await mapPool(years, 2, async (y) => {
+    const games = await loadSdqlGames(y);
+    onProgress?.(++done, years.length);
+    return games;
+  });
+  const rows = buildSdqlRows(perYear.flat());
+  sdqlRowsCache = { key, rows };
+  return rows;
 }
 
 /* ── the parameter vocabulary ───────────────────────────────────────── */
@@ -425,6 +455,13 @@ const SDQL_PARAMS = {
 for (let i=1; i<=9; i++) {
   SDQL_PARAMS[`inning${i}`] = { type:"num", get:r=>r.innings[i-1] ?? 0,
     desc:`runs scored in inning ${i}` };
+  // The running score, so "trailing after seven" is total7<o:total7 rather
+  // than a seven-term sum on each side of the comparison. Summed with an
+  // explicit loop because the innings array is keyed by frame number and can
+  // legitimately have holes in it.
+  SDQL_PARAMS[`total${i}`] = { type:"num",
+    get:r => { let s = 0; for (let k=0; k<i; k++) s += r.innings[k] || 0; return s; },
+    desc:`runs scored through inning ${i} (running total)` };
 }
 // present in real SDQL, absent here — named explicitly so a query using one
 // gets a reason instead of a bare "unknown parameter".
@@ -5236,8 +5273,14 @@ const SDQL_EXAMPLES = [
     why:"prefixes chain: the opponent scored 10+ in THEIR previous game" },
   { q:"smeetings=2 and o:smeetings=2",
     why:"both starters are making their third start of the season against this same lineup" },
+  { q:"total7<o:total7 and W",
+    why:"totalN is the running score through inning N — trailing after seven, won anyway" },
+  { q:"total6=0 and W",
+    why:"scoreless through six and still won it" },
   { q:"A and W @ team",
     why:"@ groups the matches — road wins, broken out by team" },
+  { q:"p:runs=0 and runs>4 @ season",
+    why:"widen the season range above, then group by year to see it hold up (or not)" },
 ];
 
 const sdqlCell = { fontFamily:MONO, fontSize:11.5, color:C.ink };
@@ -5265,8 +5308,12 @@ function SdqlReference() {
             <div style={{ ...desc, marginBottom:8 }}>
               A query is a chain of phrases joined by <code style={cell}>and</code> /
               {" "}<code style={cell}>or</code>, optionally negated with <code style={cell}>not</code>.
-              One result is one <em>team-game</em>, so each game in the season is
-              tested twice — once from each side.
+              One result is one <em>team-game</em>, so each game in the range is
+              tested twice — once from each side. The season selector above sets
+              how many years get searched; <code style={cell}>p:</code>,
+              {" "}<code style={cell}>s:</code>, <code style={cell}>streak</code>,
+              {" "}<code style={cell}>rest</code> and <code style={cell}>smeetings</code> all
+              restart at each new season rather than reaching back over the winter.
             </div>
           </div>
           <div>
@@ -5281,9 +5328,15 @@ function SdqlReference() {
           <div>
             <div style={{ fontFamily:MONO, fontSize:10, letterSpacing:"0.12em",
               textTransform:"uppercase", color:C.ruleDark, marginBottom:6 }}>Parameters</div>
+            {/* the nine inningN and nine totalN rows would swamp the list, so
+                only the first of each is shown, standing for its family */}
             {Object.entries(SDQL_PARAMS)
-              .filter(([k]) => !/^inning[2-9]$/.test(k))
-              .map(([k,v]) => <SdqlRefRow key={k} k={k} v={k==="inning1" ? "runs scored in inning 1 (through inning9)" : v.desc} />)}
+              .filter(([k]) => !/^(inning|total)[2-9]$/.test(k))
+              .map(([k,v]) => <SdqlRefRow key={k} k={k==="inning1" ? "inning1 … inning9"
+                : k==="total1" ? "total1 … total9" : k}
+                v={k==="inning1" ? "runs scored in that inning alone"
+                  : k==="total1" ? "running score THROUGH that inning, so total7<o:total7 is \"trailing after seven\""
+                  : v.desc} />)}
           </div>
           <div>
             <div style={{ fontFamily:MONO, fontSize:10, letterSpacing:"0.12em",
@@ -5401,12 +5454,20 @@ function SdqlResults({ res }) {
   );
 }
 
+const SDQL_YEARS = Array.from({ length: SEASON - SDQL_FIRST_SEASON + 1 },
+  (_,i) => SEASON - i);   // newest first, so the common choice is at the top
+
 function SdqlPanel() {
   const [q, setQ] = useState("p:runs=0 and runs>4");
+  const [from, setFrom] = useState(SEASON);
+  const [to, setTo] = useState(SEASON);
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState(null);
   const [err, setErr] = useState("");
   const [res, setRes] = useState(null);
+
+  const lo = Math.min(from, to), hi = Math.max(from, to);
+  const spanYears = hi - lo + 1;
 
   const run = async () => {
     const src = q.trim();
@@ -5416,7 +5477,7 @@ function SdqlPanel() {
     catch (e) { setErr(`Syntax: ${e.message}`); setRes(null); return; }
     setBusy(true); setErr(""); setRes(null); setProgress(null);
     try {
-      const rows = await loadSdqlSeason((done,total)=>setProgress({ done, total }));
+      const rows = await loadSdqlSeasons(lo, hi, (done,total)=>setProgress({ done, total }));
       setRes(sdqlRun(ast, rows));
     } catch (e) {
       setErr(e instanceof SdqlError ? e.message
@@ -5434,6 +5495,22 @@ function SdqlPanel() {
         style={{ ...inputStyle, width:"100%", fontFamily:MONO, resize:"vertical",
           lineHeight:1.5, marginBottom:12 }} />
 
+      <div style={{ display:"flex", alignItems:"center", gap:8, flexWrap:"wrap",
+        marginBottom:14 }}>
+        <span style={{ fontFamily:SANS, fontSize:13, color:C.inkSoft }}>Seasons</span>
+        <select value={from} onChange={e=>setFrom(Number(e.target.value))} style={researchSelectStyle}>
+          {SDQL_YEARS.map(y => <option key={y} value={y}>{y}</option>)}
+        </select>
+        <span style={{ fontFamily:SANS, fontSize:13, color:C.inkSoft }}>to</span>
+        <select value={to} onChange={e=>setTo(Number(e.target.value))} style={researchSelectStyle}>
+          {SDQL_YEARS.map(y => <option key={y} value={y}>{y}</option>)}
+        </select>
+        <span style={{ fontFamily:MONO, fontSize:11, color:C.ruleDark }}>
+          {spanYears === 1 ? "1 season" : `${spanYears} seasons`}
+          {spanYears > 4 && " · first run will take a while"}
+        </span>
+      </div>
+
       {err && <ErrBox>{err}</ErrBox>}
 
       <button onClick={run} disabled={busy} style={{ padding:"9px 20px",
@@ -5441,7 +5518,7 @@ function SdqlPanel() {
         color:busy?C.inkSoft:"#fff", fontFamily:MONO, fontSize:12.5, letterSpacing:"0.08em",
         textTransform:"uppercase", cursor:busy?"default":"pointer", marginBottom:20 }}>
         {busy
-          ? (progress ? `Loading season ${progress.done}/${progress.total}…` : "Running…")
+          ? (progress ? `Loading ${progress.done}/${progress.total} seasons…` : "Running…")
           : "Run query →"}
       </button>
 
