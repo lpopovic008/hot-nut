@@ -5000,7 +5000,8 @@ function TagsView({ tags, setResult, setStarred, onReady }) {
 // small month-grid date picker that drops down from the CALENDAR tab button
 // once it's already the active tab — lets you re-anchor the whole calendar
 // view to any day instead of always sitting on today.
-function MiniDatePicker({ value, onSelect, onClose }) {
+const PICKER_W = 240, PICKER_EDGE = 8;
+function MiniDatePicker({ value, onSelect, onClose, anchorRef }) {
   const [viewDate, setViewDate] = useState(() => new Date(value+"T00:00:00"));
   const ref = useRef(null);
   useEffect(() => {
@@ -5010,6 +5011,42 @@ function MiniDatePicker({ value, onSelect, onClose }) {
     document.addEventListener("keydown", onKey);
     return () => { document.removeEventListener("mousedown", onDocMouseDown); document.removeEventListener("keydown", onKey); };
   }, [onClose]);
+
+  // Anchoring this to the button with `absolute; right:0` only held while the
+  // header sat on one line. Once the nav row started wrapping on narrow
+  // screens the date button moved to the left edge, and a 240px panel hanging
+  // off its right edge ran straight off the side of the screen.
+  //
+  // So it's positioned against the VIEWPORT instead: still tucked under the
+  // button's right edge where there's room, but pulled back inside whichever
+  // margin it would otherwise cross. Written straight to the node in a layout
+  // effect rather than through state — this has to be settled before the
+  // browser paints, and it saves a render per reposition.
+  useLayoutEffect(() => {
+    const place = () => {
+      const el = ref.current;
+      if (!el) return;
+      const width = Math.min(PICKER_W, window.innerWidth - PICKER_EDGE*2);
+      const r = anchorRef?.current?.getBoundingClientRect();
+      const left = r
+        ? Math.min(Math.max(PICKER_EDGE, r.right - width),
+                   window.innerWidth - width - PICKER_EDGE)
+        : Math.max(PICKER_EDGE, (window.innerWidth - width)/2);
+      el.style.width = `${width}px`;
+      el.style.left = `${left}px`;
+      el.style.top = `${(r ? r.bottom : 56) + 6}px`;
+      // capped so a short viewport scrolls the days rather than hiding them
+      el.style.maxHeight = `${window.innerHeight - (r ? r.bottom : 56) - 6 - PICKER_EDGE}px`;
+      el.style.visibility = "visible";
+    };
+    place();
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    return () => {
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
+    };
+  }, [anchorRef]);
 
   const year = viewDate.getFullYear(), month = viewDate.getMonth();
   const firstOfMonth = new Date(year, month, 1);
@@ -5027,9 +5064,11 @@ function MiniDatePicker({ value, onSelect, onClose }) {
     display:"flex", alignItems:"center", justifyContent:"center", padding:0 };
 
   return (
-    <div ref={ref} onClick={e=>e.stopPropagation()} style={{ position:"absolute", top:"calc(100% + 6px)", right:0,
+    <div ref={ref} onClick={e=>e.stopPropagation()} style={{ position:"fixed", top:0, left:0,
+      visibility:"hidden",   // until the layout effect below has placed it
       zIndex:80, background:"#fff", border:`1px solid ${C.ink}`, borderRadius:6,
-      boxShadow:"0 12px 32px rgba(0,0,0,0.25)", padding:10, width:240, maxWidth:"calc(100vw - 24px)" }}>
+      boxShadow:"0 12px 32px rgba(0,0,0,0.25)", padding:10, width:PICKER_W,
+      boxSizing:"border-box", overflowY:"auto" }}>
       <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:8 }}>
         <button onClick={()=>setViewDate(new Date(year, month-1, 1))} style={navBtn} aria-label="Previous month">‹</button>
         <div style={{ fontFamily:MONO, fontSize:12, fontWeight:700, letterSpacing:"0.02em" }}>
@@ -5538,6 +5577,7 @@ export default function App() {
   const [cal, setCal] = useState(null);   // { load, busy } from TravelTrends
   const [playsApi, setPlaysApi] = useState(null);   // { exportPlays, playsCopied } from TagsView
   const [showDatePicker, setShowDatePicker] = useState(false);
+  const dateBtnRef = useRef(null);   // the date picker positions itself off this
 
   useEffect(() => {
     document.title = "MLB";
@@ -5627,7 +5667,7 @@ export default function App() {
             </div>
             <div style={{ display:"flex", alignItems:"center", gap:8, flexWrap:"wrap" }}>
               <div style={{ position:"relative" }}>
-                <button onClick={()=>{
+                <button ref={dateBtnRef} onClick={()=>{
                     if (tab!=="calendar") { setTab("calendar"); setShowDatePicker(false); return; }
                     setShowDatePicker(v=>!v);
                   }}
@@ -5642,7 +5682,7 @@ export default function App() {
                     : "CALENDAR"}
                 </button>
                 {showDatePicker && tab==="calendar" && cal && cal.setAnchor && (
-                  <MiniDatePicker value={cal.anchor}
+                  <MiniDatePicker value={cal.anchor} anchorRef={dateBtnRef}
                     onSelect={(iso)=>{ cal.setAnchor(iso); setShowDatePicker(false); }}
                     onClose={()=>setShowDatePicker(false)} />
                 )}
