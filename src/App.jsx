@@ -3774,7 +3774,7 @@ async function loadBatterVs(batterId, pitcherId) {
 // where these columns sit fixed to the right of a horizontally-scrollable
 // name strip rather than in a single grid together).
 const VS_STAT_COLS = "20px 16px 16px 32px";   // AB H HR AVG
-function TeamPanel({ lineup, oppName, pitcherName, pitcherId, era, battingLine, onStat, oppPitcherName, oppPitcherId, oppTeamId, date, showBoxPitching, boxPitchers, col, mates }) {
+function TeamPanel({ lineup, oppName, pitcherName, pitcherId, era, battingLine, onStat, oppPitcherName, oppPitcherId, oppTeamId, date, showBoxPitching, boxPitchers, col, mates, added, setAdded, oppAdded }) {
   // a hitter who once shared a clubhouse with the starter he's facing today
   const wasMate = (id) => !!mates?.has(id);
   const MATE_TITLE = "Played a season alongside today's opposing starter";
@@ -3782,28 +3782,26 @@ function TeamPanel({ lineup, oppName, pitcherName, pitcherId, era, battingLine, 
   // the manually-added "bulk pitcher" (see AddPitcherBlock) is controlled
   // here, not inside that component, so it can also unlock its own
   // "vs [name]" lineup tab below.
-  const [addedPitcher, setAddedPitcher] = useState(null);   // { id, name }
+  // `added` is the extra pitcher on THIS panel's own staff — he shows up in
+  // the pitcher box above, alongside the starter. `oppAdded` is the one the
+  // other side added, i.e. the arm THIS lineup would actually have to bat
+  // against, which is what the "vs …" tab below is built from. Lining a
+  // staff's own hitters up against their own reliever was the bug.
   // null = neither tab open, nothing shown yet — tapping a tab opens it,
   // tapping the already-open tab closes it again (accordion, not a toggle
   // between two always-visible views). Only the batting lineup collapses
   // like this; the starting-pitcher/box-score pitching block above it is
   // always shown regardless of `view`.
-  const [view, setView] = useState(null);         // null | "last5" | "vssp" | "vsadded"
+  const [rawView, setView] = useState(null);      // null | "last5" | "vssp" | "vsadded"
   const [vsData, setVsData] = useState({});       // batterId -> stat | null, vs the opposing starter
   const [vsLoading, setVsLoading] = useState(false);
-  const [vsDataAdded, setVsDataAdded] = useState({});   // batterId -> stat | null, vs the added pitcher
+  const [vsDataAdded, setVsDataAdded] = useState({});   // { pid, data:{batterId->stat|null} } vs the opposing added pitcher
   const [vsLoadingAdded, setVsLoadingAdded] = useState(false);
 
-  // adding or dropping the bulk pitcher invalidates any cached "vs him"
-  // data, and (dropping only) bumps the viewer off that tab if it was open
-  // — done here, synchronously alongside setAddedPitcher itself, rather
-  // than reactively in an effect.
-  const handleSetAddedPitcher = (val) => {
-    setAddedPitcher(val);
-    setVsDataAdded({});
-    setVsLoadingAdded(false);
-    if (!val && view==="vsadded") setView(null);
-  };
+  // the other side dropping their extra pitcher takes this tab with it, so
+  // fall back to closed rather than leaving a dead view selected
+  const oppAddedId = oppAdded?.id || null;
+  const view = rawView==="vsadded" && !oppAddedId ? null : rawView;
 
   // lazy-load batter-vs-pitcher lines the first time each tab flips open
   useEffect(() => {
@@ -3821,20 +3819,22 @@ function TeamPanel({ lineup, oppName, pitcherName, pitcherId, era, battingLine, 
   }, [view, canVs, oppPitcherId, lineup]);
 
   useEffect(() => {
-    if (view !== "vsadded" || !addedPitcher || !lineup?.players?.length) return;
+    if (view !== "vsadded" || !oppAddedId || !lineup?.players?.length) return;
     let alive = true;
     setVsLoadingAdded(true);
     (async () => {
       const data = {};
       await mapPool(lineup.players, 4, async p=>{
-        data[p.id] = await loadBatterVs(p.id, addedPitcher.id);
+        data[p.id] = await loadBatterVs(p.id, oppAddedId);
       });
-      if (alive) { setVsDataAdded(data); setVsLoadingAdded(false); }
+      if (alive) { setVsDataAdded({ pid:oppAddedId, data }); setVsLoadingAdded(false); }
     })();
     return () => { alive = false; };
-  }, [view, addedPitcher, lineup]);
+  }, [view, oppAddedId, lineup]);
 
-  const activeVsData = view === "vsadded" ? vsDataAdded : vsData;
+  const activeVsData = view === "vsadded"
+    ? (vsDataAdded.pid===oppAddedId ? vsDataAdded.data : {})   // stale if he changed
+    : vsData;
   const activeVsLoading = view === "vsadded" ? vsLoadingAdded : vsLoading;
 
   const tabBtn = (id,label,enabled=true) => (
@@ -3877,7 +3877,7 @@ function TeamPanel({ lineup, oppName, pitcherName, pitcherId, era, battingLine, 
             {/* the probable "starter" is sometimes just a 1-2 inning opener —
                 let the viewer look up the actual bulk pitcher alongside them */}
             <AddPitcherBlock oppName={oppName} oppTeamId={oppTeamId} date={date}
-              added={addedPitcher} setAdded={handleSetAddedPitcher} />
+              added={added} setAdded={setAdded} />
           </>
         )}
       </div>
@@ -3900,7 +3900,7 @@ function TeamPanel({ lineup, oppName, pitcherName, pitcherId, era, battingLine, 
           title={!lineup ? "Lineup loading…" : lineup.source==="confirmed" ? "Batting lineup confirmed"
             : lineup.source==="projected" ? "Batting lineup projected" : "No lineup yet"} />
         {tabBtn("vssp", canVs ? `vs ${oppPitcherName.split(" ").slice(-1)[0]}` : "vs SP", canVs)}
-        {addedPitcher && tabBtn("vsadded", `vs ${addedPitcher.name.split(" ").slice(-1)[0]}`)}
+        {oppAdded && tabBtn("vsadded", `vs ${oppAdded.name.split(" ").slice(-1)[0]}`)}
         {tabBtn("last5","Last 5")}
       </div>
 
@@ -4170,6 +4170,14 @@ function GameModal({ m, tags, setTag, now, onClose, ensureBattingLine }) {
   const [h2h,    setH2H]    = useState(undefined);
   const [h2hOpen, setH2hOpen] = useState(false);
   const [teammateMarks, setTeammateMarks] = useState(null);   // lineup teamId -> Set(playerId)
+  // Extra ("bulk") pitchers, one per staff. Held here rather than inside a
+  // panel because the side that ADDS an arm and the lineup that has to BAT
+  // against him are different panels. Keyed by gamePk so arrowing to the next
+  // game starts clean without a reset effect.
+  const [addedPitchers, setAddedPitchers] = useState({});
+  const addedFor = (side) => addedPitchers[g.gamePk]?.[side] || null;
+  const setAddedFor = (side, val) => setAddedPitchers(m => ({
+    ...m, [g.gamePk]: { ...(m[g.gamePk]||{}), [side]: val } }));
   const [pick,   setPick]   = useState(null);   // {name, stat, ts} -> prop analyzer
   // live/finished games show the game's actual box score (line score by
   // inning, and the actual pitching line) instead of pre-game previews. MLB's
@@ -4496,7 +4504,11 @@ function GameModal({ m, tags, setTag, now, onClose, ensureBattingLine }) {
             pitcher box on one side never pushes that side's batting-five or
             lineup out of line with the other side's. */}
         <div className="ts-lineups" style={{ gap:0 }}>
+          {/* away panel: adds to the AWAY staff, but its hitters bat against
+              whatever extra arm the HOME side added */}
           <TeamPanel oppName={g.homeName} col={1} mates={matesFor(g.awayId)}
+            added={addedFor("away")} setAdded={v=>setAddedFor("away",v)}
+            oppAdded={addedFor("home")}
             lineup={awayLU} pitcherName={g.awayPname} pitcherId={g.awayPid}
             oppPitcherName={g.homePname} oppPitcherId={g.homePid}
             oppTeamId={g.homeId} date={date} era={t ? t.pitcherEra(g.awayId) : null}
@@ -4505,6 +4517,8 @@ function GameModal({ m, tags, setTag, now, onClose, ensureBattingLine }) {
             onStat={(name,stat)=>setPick({ name, stat, ts:Date.now() })} />
           <div style={{ gridColumn:2, gridRow:"1 / span 3", background:C.rule }} />
           <TeamPanel oppName={g.awayName} col={3} mates={matesFor(g.homeId)}
+            added={addedFor("home")} setAdded={v=>setAddedFor("home",v)}
+            oppAdded={addedFor("away")}
             lineup={homeLU} pitcherName={g.homePname} pitcherId={g.homePid}
             oppPitcherName={g.awayPname} oppPitcherId={g.awayPid}
             oppTeamId={g.awayId} date={date} era={t ? t.pitcherEra(g.homeId) : null}
