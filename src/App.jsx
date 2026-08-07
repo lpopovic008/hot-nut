@@ -1969,10 +1969,14 @@ function TravelTrends({ tags, setTag, onReady }) {
     });
 
     // "reality check": the Gauntlet read backwards. This team has been eating
-    // soft pitching — the starters they've faced across their last 3+ games
-    // average worse than a 4.50 ERA — and today they run into someone under
-    // 3.50. Judged on the AVERAGE rather than each start individually, so one
-    // decent arm inside an otherwise cushy stretch doesn't disqualify it.
+    // soft pitching for 3+ straight games and today runs into someone under a
+    // 3.50 ERA.
+    //
+    // TWO tests, because either alone lets junk through. Every starter in the
+    // run must be over 3.50 himself, or an average would happily pair a 2.00
+    // ace with an 8.00 mop-up man and call the stretch soft — it wasn't, they
+    // just caught one bad arm. And the run's average must still clear 4.50, so
+    // three merely-mediocre starts don't dress up as a cakewalk.
     //
     // The run extends past three only while adding the next game back keeps
     // the average above the line, which stops a long-ago blowout matchup from
@@ -1990,7 +1994,9 @@ function TravelTrends({ tags, setTag, onReady }) {
       for (let i=idx-1; i>=0; i--) {
         const pid = sched[i]?.oppPid;
         const era = pid ? faced[pid]?.season?.era : null;
-        if (era==null) break;          // unknown starter breaks the run, as above
+        // an unknown starter ends the run, as above — and so does a genuinely
+        // good one, who is the opposite of what this trend is looking for
+        if (era==null || era <= 3.50) break;
         eras.push(era);
       }
       if (eras.length < 3) return;
@@ -2400,7 +2406,7 @@ const SHUTOUT_LEGEND_ENTRY = bigDaySlotFor("zero");
 // can be coming off both a brutal and a soft stretch at once.
 const gauntletSlotFor = (kind) => kind==="easy"
   ? { key:"gauntlet", color:C.reality, label:"Reality Check", shortLabel:"Reality",
-      desc:"Starters faced across their last 3+ games average worse than a 4.50 ERA — and today they run into someone under 3.50" }
+      desc:"Faced 3+ straight starters each over a 3.50 ERA and averaging worse than 4.50 — and today they run into someone under 3.50" }
   : TREND_SLOTS.find(s=>s.key==="gauntlet");
 const REALITY_LEGEND_ENTRY = gauntletSlotFor("easy");
 // Big Day and its opposite-extreme twin Shutout are one box, so the legend
