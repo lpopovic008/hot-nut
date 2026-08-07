@@ -189,6 +189,9 @@ function buildSdqlRows(games) {
       dow: new Date(`${date}T12:00:00`).getDay(),
       team: me.name, teamId: me.id, oTeam: opp.name, oTeamId: opp.id,
       site: siteName, runs: me.score, hits: me.hits, errors: me.errors,
+      // the park this was played in, as a timezone rank — lets a query say
+      // "was out west last night, back east tonight" without leaving SDQL
+      tz: TZ_RANK[TEAM_TZ[siteName==="home" ? me.id : opp.id]] ?? null,
       starter: me.starter, starterId: me.starterId,
       // key each frame off its own `num` rather than its position in the
       // array: a linescore that skips or reorders a frame would otherwise
@@ -346,6 +349,7 @@ const SDQL_PARAMS = {
   team:     { type:"str", get:r=>r.team,     desc:"team name" },
   opponent: { type:"str", get:r=>r.oTeam,    desc:"opponent name" },
   site:     { type:"str", get:r=>r.site,     desc:"'home' or 'away'" },
+  tz:       { type:"num", get:r=>r.tz,       desc:"venue time zone: 0 Pacific, 1 Mountain, 2 Central, 3 Eastern" },
   starter:  { type:"str", get:r=>r.starter,  desc:"probable/actual starting pitcher" },
   smeetings:{ type:"num", get:r=>r.smeetings,
     desc:"starts this pitcher has already made against tonight's opponent this season — 2 means this is his third" },
@@ -5409,31 +5413,81 @@ function SdqlPanel() {
 }
 
 /* ── Indicator browser ────────────────────────────────────────────────
-   Pick one of the calendar's indicators and see every team-game in the
-   loaded window that it fires on. The trend engine only exists for the
-   seven days the calendar has fetched, so that window is the search
-   space — the day picker in the header moves it. */
+   Pick one of the calendar's indicators and see every team-game it fires
+   on. Two search spaces, because the indicators aren't all made of the
+   same stuff:
+
+   • Most are decidable from the schedule + linescore alone, so they get
+     written as SDQL and run over whatever season range you choose —
+     record, run averages and the full game list, same as the SDQL tab.
+   • The Gauntlet and Homecoming Jinx need per-pitcher season ERAs and
+     career histories, which is a fetch per pitcher per game. Across even
+     one season that's thousands of requests, so those two stay scoped to
+     the week the calendar has already loaded. */
 const INDICATOR_CHOICES = [
-  { id:"bigday",     key:"bigday", kind:"runs", ...TREND_SLOTS.find(s=>s.key==="bigday") },
-  { id:"shutout",    key:"bigday", kind:"zero", ...SHUTOUT_LEGEND_ENTRY },
-  ...TREND_SLOTS.filter(s=>s.key!=="bigday").map(s=>({ id:s.key, key:s.key, kind:null, ...s })),
+  { id:"bigday", key:"bigday", kind:"runs", ...TREND_SLOTS.find(s=>s.key==="bigday"),
+    sdql:"p:runs>=10" },
+  { id:"shutout", key:"bigday", kind:"zero", ...SHUTOUT_LEGEND_ENTRY,
+    sdql:"p:runs=0",
+    sdqlNote:"Season view is the plain version — shut out last game. The " +
+      "calendar box additionally wants a sub-3.50 starter today or a second " +
+      "straight shutout, which needs pitcher data the season scan doesn't load." },
+  { id:"late", key:"late", kind:null, ...TREND_SLOTS.find(s=>s.key==="late"),
+    sdql:["p:total1<=p:o:total1","p:total2<=p:o:total2","p:total3<=p:o:total3",
+          "p:total4<=p:o:total4","p:total5<=p:o:total5","p:total6<=p:o:total6",
+          "p:total7<p:o:total7","p:W"].join(" and "),
+    sdqlNote:"Read off the linescore: never ahead through any of the first " +
+      "six innings, behind after seven, won anyway. The calendar version " +
+      "tracks the lead mid-inning too, so it catches a few this misses." },
+  { id:"gauntlet", key:"gauntlet", kind:null, ...TREND_SLOTS.find(s=>s.key==="gauntlet"),
+    sdql:null },
+  { id:"formerTeam", key:"formerTeam", kind:null, ...TREND_SLOTS.find(s=>s.key==="formerTeam"),
+    sdql:null },
+  { id:"echo", key:"echo", kind:null, ...TREND_SLOTS.find(s=>s.key==="echo"),
+    sdql:"(p:streak>=10 and p:L) or (p:streak<=-10 and p:W)" },
+  { id:"travel", key:"travel", kind:null, ...TREND_SLOTS.find(s=>s.key==="travel"),
+    sdql:"p:tz<=1 and tz=3" },
 ];
 
 function IndicatorBrowser({ cal }) {
   const [picked, setPicked] = useState("bigday");
+  const [from, setFrom] = useState(SEASON);
+  const [to, setTo] = useState(SEASON);
+  const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState(null);
+  const [err, setErr] = useState("");
+  const [res, setRes] = useState(null);
+
   const hits = cal?.indicatorHits;
   const choice = INDICATOR_CHOICES.find(c=>c.id===picked) || INDICATOR_CHOICES[0];
+  const lo = Math.min(from,to), hi = Math.max(from,to), spanYears = hi-lo+1;
 
-  // count per indicator so the chips show how much there is to look at
   const countFor = (c) => !hits ? null
     : hits.filter(h => h.key===c.key && (c.kind==null
         || (c.kind==="zero" ? h.kind==="zero" : h.kind!=="zero"))).length;
 
-  const rows = !hits ? [] : hits
+  const weekRows = !hits ? [] : hits
     .filter(h => h.key===choice.key && (choice.kind==null
       || (choice.kind==="zero" ? h.kind==="zero" : h.kind!=="zero")))
     .slice()
     .sort((a,b) => a.date.localeCompare(b.date) || (a.time||"").localeCompare(b.time||""));
+
+  const pick = (id) => { setPicked(id); setRes(null); setErr(""); };
+
+  const run = async () => {
+    if (!choice.sdql) return;
+    setBusy(true); setErr(""); setRes(null); setProgress(null);
+    try {
+      const ast = sdqlParse(choice.sdql);
+      const rows = await loadSdqlSeasons(lo, hi, (done,total)=>setProgress({ done, total }));
+      setRes(sdqlRun(ast, rows));
+    } catch (e) {
+      setErr(e instanceof SdqlError ? e.message
+        : isNet(e.message)
+          ? "Couldn't reach the MLB data service. This works from a normal browser tab with an internet connection."
+          : e.message);
+    } finally { setBusy(false); }
+  };
 
   return (
     <div>
@@ -5442,7 +5496,7 @@ function IndicatorBrowser({ cal }) {
         {INDICATOR_CHOICES.map(c => {
           const on = c.id===picked, n = countFor(c);
           return (
-            <button key={c.id} onClick={()=>setPicked(c.id)} title={c.desc}
+            <button key={c.id} onClick={()=>pick(c.id)} title={c.desc}
               style={{ display:"flex", alignItems:"center", gap:6, padding:"6px 10px",
                 border:`1px solid ${on?C.ink:C.rule}`, borderRadius:2,
                 background:on?C.ink:"transparent", cursor:"pointer" }}>
@@ -5458,62 +5512,117 @@ function IndicatorBrowser({ cal }) {
           );
         })}
       </div>
-
-      <Eyebrow n="02">Games</Eyebrow>
-      <div style={{ fontFamily:SANS, fontSize:12, color:C.inkSoft, marginBottom:10 }}>
+      <div style={{ fontFamily:SANS, fontSize:12.5, color:C.inkSoft, marginBottom:20 }}>
         {choice.desc}
       </div>
 
-      {!hits ? (
-        <div style={{ padding:"14px 16px", background:C.card, border:`1px solid ${C.rule}`,
-          borderRadius:3, fontFamily:SANS, fontSize:13, color:C.inkSoft }}>
-          Open the calendar tab once so the week's indicators load, then come back.
-        </div>
-      ) : !rows.length ? (
-        <div style={{ padding:"14px 16px", background:C.card, border:`1px solid ${C.rule}`,
-          borderRadius:3, fontFamily:SANS, fontSize:13, color:C.inkSoft }}>
-          No team in the loaded week hits this one. Move the day picker in the header
-          to search a different week.
-        </div>
+      {choice.sdql ? (
+        <>
+          <Eyebrow n="02">Seasons</Eyebrow>
+          <div style={{ display:"flex", alignItems:"center", gap:8, flexWrap:"wrap",
+            marginBottom:14 }}>
+            <select value={from} onChange={e=>{setFrom(Number(e.target.value)); setRes(null);}}
+              style={researchSelectStyle}>
+              {SDQL_YEARS.map(y => <option key={y} value={y}>{y}</option>)}
+            </select>
+            <span style={{ fontFamily:SANS, fontSize:13, color:C.inkSoft }}>to</span>
+            <select value={to} onChange={e=>{setTo(Number(e.target.value)); setRes(null);}}
+              style={researchSelectStyle}>
+              {SDQL_YEARS.map(y => <option key={y} value={y}>{y}</option>)}
+            </select>
+            <span style={{ fontFamily:MONO, fontSize:11, color:C.ruleDark }}>
+              {spanYears===1 ? "1 season" : `${spanYears} seasons`}
+              {spanYears>4 && " · first run will take a while"}
+            </span>
+          </div>
+
+          <div style={{ fontFamily:MONO, fontSize:11.5, color:C.ink, background:C.card,
+            border:`1px solid ${C.rule}`, borderRadius:3, padding:"8px 11px",
+            marginBottom:12, overflowX:"auto", whiteSpace:"pre-wrap", wordBreak:"break-word" }}>
+            {choice.sdql}
+          </div>
+          {choice.sdqlNote && (
+            <div style={{ fontFamily:SANS, fontSize:11.5, color:C.ruleDark, marginBottom:14 }}>
+              {choice.sdqlNote}
+            </div>
+          )}
+
+          {err && <ErrBox>{err}</ErrBox>}
+
+          <button onClick={run} disabled={busy} style={{ padding:"9px 20px",
+            border:`1px solid ${C.ink}`, borderRadius:2, background:busy?C.rule:C.ink,
+            color:busy?C.inkSoft:"#fff", fontFamily:MONO, fontSize:12.5,
+            letterSpacing:"0.08em", textTransform:"uppercase",
+            cursor:busy?"default":"pointer", marginBottom:22 }}>
+            {busy
+              ? (progress ? `Loading ${progress.done}/${progress.total} seasons…` : "Running…")
+              : "Get record →"}
+          </button>
+
+          {res && (
+            <>
+              <Eyebrow n="03">Record</Eyebrow>
+              <SdqlResults res={res} />
+            </>
+          )}
+        </>
       ) : (
-        <div style={{ border:`1px solid ${C.rule}`, borderRadius:3, overflow:"hidden" }}>
-          <div style={{ display:"grid", gridTemplateColumns:"0.8fr 1fr 1.4fr 0.9fr", gap:8,
-            padding:"6px 10px", background:C.card, borderBottom:`1px solid ${C.rule}`,
-            fontFamily:MONO, fontSize:9.5, letterSpacing:"0.06em", textTransform:"uppercase",
-            color:C.ruleDark }}>
-            <span>Date</span><span>Team</span><span>Game</span><span>Result</span>
+        <>
+          <Eyebrow n="02">This week</Eyebrow>
+          <div style={{ padding:"11px 14px", background:C.card, border:`1px solid ${C.rule}`,
+            borderRadius:3, fontFamily:SANS, fontSize:12, color:C.inkSoft, marginBottom:14 }}>
+            No season range for this one. It needs each pitcher's season ERA or
+            career history — a fetch per pitcher per game — so it stays scoped to
+            the week the calendar has loaded. The day picker in the header moves
+            that week.
           </div>
-          <div style={{ maxHeight:520, overflowY:"auto" }}>
-            {rows.map((h,i) => (
-              <div key={`${h.gamePk}-${h.teamId}`} style={{ display:"grid",
-                gridTemplateColumns:"0.8fr 1fr 1.4fr 0.9fr", gap:8, padding:"6px 10px",
-                borderTop: i>0 ? `1px solid ${C.rule}` : "none",
-                fontFamily:SANS, fontSize:12.5, alignItems:"center" }}>
-                <span style={{ fontFamily:MONO, fontSize:11 }}>{h.date.slice(5)}</span>
-                <span style={{ fontWeight:700 }}>{h.abbr}</span>
-                <span style={{ fontFamily:MONO, fontSize:11, color:C.inkSoft }}>
-                  {h.away} @ {h.home}
-                </span>
-                <span style={{ fontFamily:MONO, fontSize:11.5 }}>
-                  {h.isFinal && h.awayScore!=null && h.homeScore!=null
-                    ? (() => {
-                        const own = h.isHome ? h.homeScore : h.awayScore;
-                        const opp = h.isHome ? h.awayScore : h.homeScore;
-                        const won = own > opp;
-                        return <span style={{ color: won ? C.over : own<opp ? C.under : C.ink,
-                          fontWeight:700 }}>{won?"W":"L"} {own}-{opp}</span>;
-                      })()
-                    : <span style={{ color:C.ruleDark }}>—</span>}
-                </span>
+          {!hits ? (
+            <div style={{ padding:"14px 16px", background:C.card, border:`1px solid ${C.rule}`,
+              borderRadius:3, fontFamily:SANS, fontSize:13, color:C.inkSoft }}>
+              Open the calendar tab once so the week's indicators load, then come back.
+            </div>
+          ) : !weekRows.length ? (
+            <div style={{ padding:"14px 16px", background:C.card, border:`1px solid ${C.rule}`,
+              borderRadius:3, fontFamily:SANS, fontSize:13, color:C.inkSoft }}>
+              No team in the loaded week hits this one.
+            </div>
+          ) : (
+            <div style={{ border:`1px solid ${C.rule}`, borderRadius:3, overflow:"hidden" }}>
+              <div style={{ display:"grid", gridTemplateColumns:"0.8fr 1fr 1.4fr 0.9fr", gap:8,
+                padding:"6px 10px", background:C.card, borderBottom:`1px solid ${C.rule}`,
+                fontFamily:MONO, fontSize:9.5, letterSpacing:"0.06em", textTransform:"uppercase",
+                color:C.ruleDark }}>
+                <span>Date</span><span>Team</span><span>Game</span><span>Result</span>
               </div>
-            ))}
-          </div>
-        </div>
+              <div style={{ maxHeight:520, overflowY:"auto" }}>
+                {weekRows.map((h,i) => (
+                  <div key={`${h.gamePk}-${h.teamId}`} style={{ display:"grid",
+                    gridTemplateColumns:"0.8fr 1fr 1.4fr 0.9fr", gap:8, padding:"6px 10px",
+                    borderTop: i>0 ? `1px solid ${C.rule}` : "none",
+                    fontFamily:SANS, fontSize:12.5, alignItems:"center" }}>
+                    <span style={{ fontFamily:MONO, fontSize:11 }}>{h.date.slice(5)}</span>
+                    <span style={{ fontWeight:700 }}>{h.abbr}</span>
+                    <span style={{ fontFamily:MONO, fontSize:11, color:C.inkSoft }}>
+                      {h.away} @ {h.home}
+                    </span>
+                    <span style={{ fontFamily:MONO, fontSize:11.5 }}>
+                      {h.isFinal && h.awayScore!=null && h.homeScore!=null
+                        ? (() => {
+                            const own = h.isHome ? h.homeScore : h.awayScore;
+                            const opp = h.isHome ? h.awayScore : h.homeScore;
+                            const won = own > opp;
+                            return <span style={{ color: won ? C.over : own<opp ? C.under : C.ink,
+                              fontWeight:700 }}>{won?"W":"L"} {own}-{opp}</span>;
+                          })()
+                        : <span style={{ color:C.ruleDark }}>—</span>}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </>
       )}
-      <div style={{ fontFamily:SANS, fontSize:11.5, color:C.ruleDark, marginTop:8 }}>
-        {rows.length} hit{rows.length===1?"":"s"} across the seven days around{" "}
-        {cal?.start || "the selected day"}.
-      </div>
     </div>
   );
 }
