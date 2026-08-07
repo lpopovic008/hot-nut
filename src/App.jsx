@@ -38,6 +38,9 @@ const C = {
   bigday:"#F4289B",        /* neon pink: 10-run scoreboard explosion */
   echo:"#FF8C1A",          /* neon orange: momentum wave */
   gauntlet:"#0FF0FC",      /* neon cyan: a brutal stretch of ace pitching, just survived */
+  reality:"#C724FF",       /* neon purple: the mirror of the Gauntlet — a soft run of
+                              pitching, and now an ace. Shares the Gauntlet box, so it
+                              only ever needs to read as "not cyan" */
   revenge:"#8B5CF6",       /* neon violet: pitcher facing a team he used to play for */
   shutout:"#1F51FF",       /* neon blue: got blanked, 0 runs last game — shares the Big
                                Day box (opposite extreme, same slot) rather than its own */
@@ -1965,6 +1968,39 @@ function TravelTrends({ tags, setTag, onReady }) {
       if (runLen>=3) gauntlet.push({ teamId:tid, team:tname, len:runLen });
     });
 
+    // "reality check": the Gauntlet read backwards. This team has been eating
+    // soft pitching — the starters they've faced across their last 3+ games
+    // average worse than a 4.50 ERA — and today they run into someone under
+    // 3.50. Judged on the AVERAGE rather than each start individually, so one
+    // decent arm inside an otherwise cushy stretch doesn't disqualify it.
+    //
+    // The run extends past three only while adding the next game back keeps
+    // the average above the line, which stops a long-ago blowout matchup from
+    // being dragged in to prop up a stretch that has since firmed up.
+    // Shares the Gauntlet's box: a team can't be in both at once.
+    const reality = [];
+    [[g.awayId,g.awayName],[g.homeId,g.homeName]].forEach(([tid,tname])=>{
+      const sched = scheduleMap[tid];
+      if (!sched) return;
+      const idx = sched.findIndex(s=>s.gamePk===g.gamePk);
+      if (idx===-1) return;
+      const todayEra = oppPitcherEra(tid);
+      if (todayEra==null || todayEra >= 3.50) return;
+      const eras = [];
+      for (let i=idx-1; i>=0; i--) {
+        const pid = sched[i]?.oppPid;
+        const era = pid ? faced[pid]?.season?.era : null;
+        if (era==null) break;          // unknown starter breaks the run, as above
+        eras.push(era);
+      }
+      if (eras.length < 3) return;
+      const avgOf = (n) => eras.slice(0,n).reduce((s,x)=>s+x,0)/n;
+      if (!(avgOf(3) > 4.50)) return;
+      let len = 3;
+      while (len < eras.length && avgOf(len+1) > 4.50) len++;
+      reality.push({ teamId:tid, team:tname, len, avg:avgOf(len), todayEra });
+    });
+
     // the specific game(s) immediately before this one in the team's real
     // schedule (using scheduleMap's sequential order, same idea as the
     // gauntlet lookup above) — NOT "the most recent completed game found
@@ -2014,6 +2050,9 @@ function TravelTrends({ tags, setTag, onReady }) {
       shutout.push({ teamId:g.homeId, team:g.homeName });
     const bigDayKind = (tid) =>
       bigday.some(b=>b.teamId===tid) ? "big" : shutout.some(s=>s.teamId===tid) ? "zero" : null;
+    // which of the two opposite trends lit that team's Gauntlet box
+    const gauntletKind = (tid) =>
+      gauntlet.some(x=>x.teamId===tid) ? "hard" : reality.some(x=>x.teamId===tid) ? "easy" : null;
 
     // did this team score 10+ runs in each of the two games immediately
     // before this one (same strict adjacency as above, not just "the last
@@ -2087,11 +2126,13 @@ function TravelTrends({ tags, setTag, onReady }) {
     bigdayY.forEach(b=>add(b.teamId, "bigday"));
     shutoutY.forEach(s=>add(s.teamId, "bigday"));
     gauntlet.forEach(x=>add(x.teamId, "gauntlet"));
+    reality.forEach(x=>add(x.teamId, "gauntlet"));   // opposite extreme, same box
     formerTeam.forEach(x=>add(x.teamId, "formerTeam"));
 
-    const any = travelersY.length>0 || echoY.length>0 || cbY.length>0 || rematch.length>0 || bigdayY.length>0 || shutoutY.length>0 || gauntlet.length>0 || formerTeam.length>0 || grindersY.length>0;
-    return { travel:travelersY.length>0, travelers:travelersY, echo:echoY, cb:cbY, rematch, bigday:bigdayY, shutout:shutoutY, gauntlet, formerTeam, any,
+    const any = travelersY.length>0 || echoY.length>0 || cbY.length>0 || rematch.length>0 || bigdayY.length>0 || shutoutY.length>0 || gauntlet.length>0 || reality.length>0 || formerTeam.length>0 || grindersY.length>0;
+    return { travel:travelersY.length>0, travelers:travelersY, echo:echoY, cb:cbY, rematch, bigday:bigdayY, shutout:shutoutY, gauntlet, reality, formerTeam, any,
       keysFor:(tid)=>sideKeys[tid] || new Set(),
+      gauntletKind,
       // TEMPORARY — which of the two conditions lit that team's B2B box, so
       // the hover title can say. Nothing else reads this.
       travelKind:(tid)=>{
@@ -2145,7 +2186,8 @@ function TravelTrends({ tags, setTag, onReady }) {
     [[g.awayId, g.awayName], [g.homeId, g.homeName]].forEach(([tid, tname]) => {
       t.keysFor(tid).forEach(key => {
         indicatorHits.push({
-          key, kind: key==="bigday" ? t.bigDayKind(tid) : null,
+          key, kind: key==="bigday" ? t.bigDayKind(tid)
+            : key==="gauntlet" ? t.gauntletKind?.(tid) : null,
           date: d.date, gamePk: g.gamePk, teamId: tid, team: tname,
           abbr: TEAM_ABBR[tid] || "?",
           away: TEAM_ABBR[g.awayId] || "?", home: TEAM_ABBR[g.homeId] || "?",
@@ -2269,7 +2311,19 @@ function Legend() {
           </span>
         </div>
       </div>
-      {TREND_SLOTS.slice(1).map(s => <LegendRow key={s.key} s={s} />)}
+      {TREND_SLOTS.slice(1).filter(s=>s.key!=="gauntlet")
+        .map(s => <LegendRow key={s.key} s={s} />)}
+      {/* the Gauntlet's box carries its mirror the same way */}
+      <div style={{ display:"flex", gap:7 }}>
+        <span style={{ width:2, borderRadius:1, background:C.ruleDark, flexShrink:0 }} />
+        <div style={{ display:"flex", flexDirection:"column", gap:6, minWidth:0 }}>
+          {SHARED_BOX_ROWS_2.map(s => <LegendRow key={s.key+s.label} s={s} />)}
+          <span style={{ fontFamily:MONO, fontSize:9, letterSpacing:"0.08em",
+            textTransform:"uppercase", color:C.ruleDark }}>
+            ↑ one box, two colors — opposite stretches of pitching
+          </span>
+        </div>
+      </div>
       <LegendRow s={DUEL_LEGEND_ENTRY} />
       <div style={{ fontFamily:SANS, fontSize:10, color:C.ruleDark, marginTop:2 }}>
         * Void if the team had an off day yesterday — these are all specifically
@@ -2342,7 +2396,18 @@ const SHUTOUT_LEGEND_ENTRY = bigDaySlotFor("zero");
 // Big Day and its opposite-extreme twin Shutout are one box, so the legend
 // renders them as a bracketed pair (see Legend) rather than as two rows that
 // look like two separate slots; everything after them is a slot of its own.
+// same trick for the Gauntlet's box: Reality Check is its mirror, and no team
+// can be coming off both a brutal and a soft stretch at once.
+const gauntletSlotFor = (kind) => kind==="easy"
+  ? { key:"gauntlet", color:C.reality, label:"Reality Check", shortLabel:"Reality",
+      desc:"Starters faced across their last 3+ games average worse than a 4.50 ERA — and today they run into someone under 3.50" }
+  : TREND_SLOTS.find(s=>s.key==="gauntlet");
+const REALITY_LEGEND_ENTRY = gauntletSlotFor("easy");
+// Big Day and its opposite-extreme twin Shutout are one box, so the legend
+// renders them as a bracketed pair (see Legend) rather than as two rows that
+// look like two separate slots; the Gauntlet and Reality Check pair the same way.
 const SHARED_BOX_ROWS = [TREND_SLOTS[0], SHUTOUT_LEGEND_ENTRY];
+const SHARED_BOX_ROWS_2 = [TREND_SLOTS.find(s=>s.key==="gauntlet"), REALITY_LEGEND_ENTRY];
 // legend-only, and not a trend box at all: the neon-yellow outline drawn
 // around BOTH ERA numbers when each starter has already faced the lineup
 // across from him 2+ times this season. `outline` renders the swatch as a
@@ -2671,8 +2736,10 @@ function StatsRow({ tid, t, dark }) {
       <span style={{ width:7, flexShrink:0 }} />
       <div style={{ display:"flex", alignItems:"center", gap:BOX_GAP }}>
         {TREND_SLOTS.map(slot=>{
-          const kind = slot.key==="bigday" ? t.bigDayKind(tid) : null;
-          const s = slot.key==="bigday" ? bigDaySlotFor(kind) : slot;
+          const kind = slot.key==="bigday" ? t.bigDayKind(tid)
+            : slot.key==="gauntlet" ? t.gauntletKind?.(tid) : null;
+          const s = slot.key==="bigday" ? bigDaySlotFor(kind)
+            : slot.key==="gauntlet" ? gauntletSlotFor(kind) : slot;
           const present = t.keysFor(tid).has(slot.key);
           // Shutout only earns "!" on a real 2+ game shutout streak, same as
           // Big Day earning it on a 2+ game 10-run streak — a single shutout
@@ -5453,8 +5520,9 @@ const INDICATOR_CHOICES = [
     sdqlNote:"Read off the linescore: never ahead through any of the first " +
       "six innings, behind after seven, won anyway. The calendar version " +
       "tracks the lead mid-inning too, so it catches a few this misses." },
-  { id:"gauntlet", key:"gauntlet", kind:null, ...TREND_SLOTS.find(s=>s.key==="gauntlet"),
+  { id:"gauntlet", key:"gauntlet", kind:"hard", ...TREND_SLOTS.find(s=>s.key==="gauntlet"),
     sdql:null },
+  { id:"reality", key:"gauntlet", kind:"easy", ...REALITY_LEGEND_ENTRY, sdql:null },
   { id:"formerTeam", key:"formerTeam", kind:null, ...TREND_SLOTS.find(s=>s.key==="formerTeam"),
     sdql:null },
   { id:"echo", key:"echo", kind:null, ...TREND_SLOTS.find(s=>s.key==="echo"),
@@ -5476,13 +5544,16 @@ function IndicatorBrowser({ cal }) {
   const choice = INDICATOR_CHOICES.find(c=>c.id===picked) || INDICATOR_CHOICES[0];
   const lo = Math.min(from,to), hi = Math.max(from,to), spanYears = hi-lo+1;
 
+  // "runs"/"hard" mean "this key, but not the mirror kind"; the mirror kinds
+  // ("zero"/"easy") match exactly
+  const MIRROR = { zero:1, easy:1 };
+  const kindOk = (c,h) => c.kind==null ? true
+    : MIRROR[c.kind] ? h.kind===c.kind : !MIRROR[h.kind];
   const countFor = (c) => !hits ? null
-    : hits.filter(h => h.key===c.key && (c.kind==null
-        || (c.kind==="zero" ? h.kind==="zero" : h.kind!=="zero"))).length;
+    : hits.filter(h => h.key===c.key && kindOk(c,h)).length;
 
   const weekRows = !hits ? [] : hits
-    .filter(h => h.key===choice.key && (choice.kind==null
-      || (choice.kind==="zero" ? h.kind==="zero" : h.kind!=="zero")))
+    .filter(h => h.key===choice.key && kindOk(choice,h))
     .slice()
     .sort((a,b) => a.date.localeCompare(b.date) || (a.time||"").localeCompare(b.time||""));
 
