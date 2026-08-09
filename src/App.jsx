@@ -3135,6 +3135,20 @@ function PitcherSeasonModal({ pid, name, onClose, upcoming }) {
     return m;
   }, [displayLog]);
 
+  // Which of these appearances he actually started, read off the game log's
+  // own gamesStarted flag (1 when he took the ball first for his side that
+  // day, 0 when he came on in relief).
+  //
+  // If the field is missing from the response entirely there's no way to tell
+  // a start from a relief outing, so every row is treated as a start — the
+  // log then looks exactly as it did before this existed, rather than marking
+  // a whole season of starts as relief work.
+  const startFlags = useMemo(() => {
+    const rows = displayLog || [];
+    const known = rows.some(s => s.stat?.gamesStarted != null);
+    return { known, isStart: (s) => !known || Number(s.stat?.gamesStarted) > 0 };
+  }, [displayLog]);
+
   // the situation this pitcher is actually walking into today: the upcoming
   // opponent's own batting score + hits in their game right before this one.
   // Any past start whose own opponent-score lands within ±1 of that gets its
@@ -3199,11 +3213,17 @@ function PitcherSeasonModal({ pid, name, onClose, upcoming }) {
             const highlightScore = !s.isUpcoming && scoreSimilar(ctx);
             const highlightHits = !s.isUpcoming && hitsSimilar(ctx);
             const metaBg = s.isUpcoming ? "rgba(22,162,223,0.14)" : PLINE_META_BG;
+            const started = startFlags.isStart(s);
             return (
             <div key={i} style={{ display:"grid", gridTemplateColumns:"38px 32px minmax(0,1fr)",
               padding:"5px 12px", borderTop:`1px solid #EEF0F2`, alignItems:"baseline" }}>
-              <span title={s.isUpcoming ? "Upcoming — not played yet" : undefined} style={{ fontFamily:MONO, fontSize:11,
-                color: s.isUpcoming ? C.rematch : C.inkSoft, fontWeight: s.isUpcoming ? 700 : 400,
+              {/* bold date = he started that day; plain = came on in relief */}
+              <span title={s.isUpcoming ? "Upcoming — not played yet"
+                  : !startFlags.known ? undefined
+                  : started ? "Started this game" : "Relief appearance — did not start"}
+                style={{ fontFamily:MONO, fontSize:11,
+                color: s.isUpcoming ? C.rematch : C.inkSoft,
+                fontWeight: s.isUpcoming || started ? 700 : 400,
                 background: metaBg, paddingTop:5, paddingBottom:5, marginTop:-5, marginBottom:-5 }}>{calDay(s.date).md}</span>
               <span style={{ fontFamily:MONO, fontSize:11,
                 background: metaBg, borderLeft:`1px solid ${C.rule}`, paddingLeft:6,
