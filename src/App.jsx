@@ -743,6 +743,8 @@ function pitcherSeasonAverages(splits) {
     bb9: sum("baseOnBalls")*27/outs,
     k9: sum("strikeOuts")*27/outs,
     era: sum("earnedRuns")*27/outs,
+    // outs/3 is the innings behind the log, so (H+BB)*3/outs is WHIP
+    whip: (sum("hits")+sum("baseOnBalls"))*3/outs,
   };
 }
 // colors one pitcher start's IP/H/ER/BB/K line relative to the pitcher's own
@@ -1931,6 +1933,13 @@ function TravelTrends({ tags, setTag, onReady }) {
       const era = pid ? faced[pid]?.season?.era : null;
       return era!=null ? era : null;
     };
+    // same starter, his season WHIP — comes off the same cached game log the
+    // ERA does, so showing it costs nothing extra
+    const pitcherWhip = (tid) => {
+      const pid = tid===g.awayId ? g.awayPid : tid===g.homeId ? g.homePid : null;
+      const w = pid ? faced[pid]?.season?.whip : null;
+      return w!=null ? w : null;
+    };
     // the OTHER side's probable starter's ERA — who this team is actually
     // about to face today (used by the Shutout indicator below to judge
     // whether they're staring down a good pitcher).
@@ -2150,6 +2159,7 @@ function TravelTrends({ tags, setTag, onReady }) {
       rematchVerdict:(tid)=>rematchVerdict[tid] || null,
       rematchCount:(tid)=>rematchCount[tid] || 0,
       pitcherEra,
+      pitcherWhip,
       bigDayStreak,
       shutoutStreak,
       hitsLine };
@@ -2344,6 +2354,8 @@ function Legend() {
    so everything still lines up under the PITCHER/BATTER headers. */
 const BOX_W = 14, BOX_H = 13, BOX_GAP = 1.5;
 const ERA_BOX_W = 26;   // "12.34" needs ~24px at this font, hits never do
+const WHIP_BOX_W = 22;  // WHIP is always "N.NN" — one digit narrower than ERA
+const PB_GAP = 4;       // between the WHIP and ERA numbers, and their headers
 const MAIN_H = 19;                         // a team's row height
 const BASES_W = 26;                        // reserved for the live bases display — never shifts
 /* A card and an empty slot MUST come out to the same height, or a column
@@ -2693,10 +2705,28 @@ function LiveDiamond({ inningNum, inningState, outs, onFirst, onSecond, onThird,
    games batting trio that used to sit next to this lives in the game modal
    now, alongside that game's trend indicators. */
 function pitcherBatterStats(t, tid) {
-  return { era: t.pitcherEra(tid), verdict: t.rematchVerdict(tid) };
+  return { era: t.pitcherEra(tid), whip: t.pitcherWhip?.(tid) ?? null,
+    verdict: t.rematchVerdict(tid) };
+}
+/* WHIP sits to the left of the ERA and stays a plain number: the soft
+   rematch-verdict fill belongs to one figure, and doubling it across both
+   would read as two separate verdicts rather than one. */
+function WhipNum({ whip, dark }) {
+  const has = whip != null;
+  return (
+    <span title="Season WHIP" style={{ width:WHIP_BOX_W, flexShrink:0, textAlign:"center",
+      fontFamily:MONO, fontSize:8, fontWeight:700, whiteSpace:"nowrap",
+      color: has ? (dark?C.darkText:C.ink) : (dark?C.darkTextSoft:C.ruleDark) }}>
+      {has ? <TightDecimal text={whip.toFixed(2)} /> : "–"}</span>
+  );
 }
 function PBBoxRow({ s, dark }) {
-  return <EraNum era={s.era} verdict={s.verdict} dark={dark} />;
+  return (
+    <span style={{ display:"flex", alignItems:"center", gap:PB_GAP, flexShrink:0 }}>
+      <WhipNum whip={s.whip} dark={dark} />
+      <EraNum era={s.era} verdict={s.verdict} dark={dark} />
+    </span>
+  );
 }
 
 /* column 1 — Game: the two team lines, with a fixed-width slot next to the
@@ -2715,11 +2745,16 @@ function GameSection({ g, aw, hm, awWon, hmWon, final, live, dark }) {
   );
 }
 
-/* "ERA" column label, sized to sit centered directly over EraNum below. */
+/* WHIP/ERA column labels, each sized and spaced to sit centered directly over
+   its own number in PBBoxRow below. */
 function PBHeaderLabels({ dark }) {
+  const lbl = { textAlign:"center", fontFamily:MONO, fontSize:7, fontWeight:700,
+    letterSpacing:"0.05em", color: dark?C.darkTextSoft:C.inkSoft };
   return (
-    <div style={{ width:ERA_BOX_W, textAlign:"center", fontFamily:MONO, fontSize:7, fontWeight:700,
-      letterSpacing:"0.05em", color: dark?C.darkTextSoft:C.inkSoft }}>ERA</div>
+    <div style={{ display:"flex", alignItems:"center", gap:PB_GAP }}>
+      <div style={{ ...lbl, width:WHIP_BOX_W }}>WHIP</div>
+      <div style={{ ...lbl, width:ERA_BOX_W }}>ERA</div>
+    </div>
   );
 }
 
