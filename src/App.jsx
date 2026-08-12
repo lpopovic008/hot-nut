@@ -747,6 +747,54 @@ function pitcherSeasonAverages(splits) {
     whip: (sum("hits")+sum("baseOnBalls"))*3/outs,
   };
 }
+/* His best and worst recent runs.
+
+   Every candidate is a run of his most recent starts — a prefix of the
+   newest-first log — so each one is continuous and always contains his latest
+   start. That's the whole point: "how has he been throwing lately" only means
+   something if the window ends at today. A stretch that skips his last two
+   outings describes a pitcher who no longer exists.
+
+   The best run is simply the prefix with the lowest ERA, the worst the
+   highest, so a bad sixth-from-last start is only included when it genuinely
+   belongs. Two guards on top of that:
+
+   • A run has to be at least STRETCH_MIN starts. Without a floor the "best
+     stretch" is always just his single best outing, which is a highlight, not
+     form.
+   • Among runs within STRETCH_TIE of the extreme, the LONGEST wins. Five
+     starts at a 2.05 ERA says more about a pitcher than three at 1.95, and
+     without this the search almost always snaps back to the minimum. */
+const STRETCH_MIN = 3;
+const STRETCH_TIE = 0.25;     // ERA gap small enough to call two runs equal
+function recentStretches(starts) {
+  const n = starts?.length || 0;
+  if (n < STRETCH_MIN) return null;
+  const cands = [];
+  for (let len = STRETCH_MIN; len <= n; len++) {
+    const run = starts.slice(0, len);          // newest-first, so this is the tail of his season
+    const outs = run.reduce((s,g)=>s+ipToOuts(g.stat?.inningsPitched), 0);
+    if (!outs) continue;
+    const sum = (k)=>run.reduce((s,g)=>s+(Number(g.stat?.[k])||0), 0);
+    cands.push({ len, outs,
+      era: sum("earnedRuns")*27/outs,
+      whip: (sum("hits")+sum("baseOnBalls"))*3/outs,
+      k9: sum("strikeOuts")*27/outs,
+      ipPer: outs/3/len,
+      from: run[run.length-1].date, to: run[0].date });
+  }
+  if (!cands.length) return null;
+  const pick = (wantLower) => {
+    const target = cands.reduce((a,c)=>(wantLower ? c.era<a.era : c.era>a.era) ? c : a).era;
+    return cands.filter(c=>Math.abs(c.era-target) <= STRETCH_TIE)
+      .reduce((a,c)=> c.len>a.len ? c : a);
+  };
+  const best = pick(true), worst = pick(false);
+  // one steady run start to finish — calling the same window both his best and
+  // his worst would be noise, so the caller shows it once
+  return { best, worst, flat: best.len===worst.len };
+}
+
 // colors one pitcher start's IP/H/ER/BB/K line relative to the pitcher's own
 // season pace (or fixed fallback thresholds if no season data exists yet).
 // Shared by PLine's rendering and the pitcher-rematch verdict below, which
@@ -3100,6 +3148,35 @@ async function loadPitcherVs(pid, oppId, date) {
   } catch { return null; }
 }
 
+/* one run's headline: how many starts, the dates it spans, and what he did
+   across it. Laid out as its own four-column grid so best and worst line up
+   with each other rather than with the season totals above. */
+function StretchRow({ label, st, col }) {
+  return (
+    <div style={{ padding:"5px 12px 8px", borderTop:`1px solid ${C.rule}` }}>
+      <div style={{ display:"flex", alignItems:"baseline", gap:7, flexWrap:"wrap" }}>
+        <span style={{ fontFamily:MONO, fontSize:9.5, fontWeight:800, letterSpacing:"0.08em",
+          textTransform:"uppercase", color:col }}>{label}</span>
+        <span style={{ fontFamily:SANS, fontSize:12.5, fontWeight:700, color:C.ink }}>
+          last {st.len} starts</span>
+        <span style={{ fontFamily:MONO, fontSize:10, color:C.ruleDark }}>
+          {calDay(st.from).md}–{calDay(st.to).md}</span>
+      </div>
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:4, marginTop:4 }}>
+        {[["ERA",st.era.toFixed(2)],["WHIP",st.whip.toFixed(2)],
+          ["IP/GS",st.ipPer.toFixed(1)],["K/9",st.k9.toFixed(1)]].map(([l,v])=>(
+          <div key={l} style={{ minWidth:0 }}>
+            <div style={{ fontFamily:MONO, fontSize:8, letterSpacing:"0.06em",
+              textTransform:"uppercase", color:C.inkSoft }}>{l}</div>
+            <div style={{ fontFamily:MONO, fontSize:13, fontWeight:700,
+              whiteSpace:"nowrap" }}>{v}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function PitcherSeasonModal({ pid, name, onClose, upcoming }) {
   const [log, setLog] = useState(undefined);
   useEffect(() => {
@@ -3184,6 +3261,12 @@ function PitcherSeasonModal({ pid, name, onClose, upcoming }) {
     return { known, isStart: (s) => !known || Number(s.stat?.gamesStarted) > 0 };
   }, [displayLog]);
 
+  // best/worst recent run, over his STARTS only — relief outings aren't form
+  // for a starter. Falls back to every appearance when the log can't tell.
+  const stretches = useMemo(
+    () => recentStretches((log||[]).filter(s => startFlags.isStart(s))),
+    [log, startFlags]);
+
   // the situation this pitcher is actually walking into today: the upcoming
   // opponent's own batting score + hits in their game right before this one.
   // Any past start whose own opponent-score lands within ±1 of that gets its
@@ -3213,15 +3296,34 @@ function PitcherSeasonModal({ pid, name, onClose, upcoming }) {
         </div>
 
         {tot && (
-          <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(70px,1fr))",
+          // six fixed columns rather than auto-fit: at a phone's width auto-fit
+          // couldn't hold its 70px minimum and dropped the last two onto a
+          // second line. Equal fractions always fit on one, and the padding
+          // gives way before the numbers do.
+          <div style={{ display:"grid", gridTemplateColumns:"repeat(6,1fr)",
             borderBottom:`1px solid ${C.rule}`, background:C.card }}>
             {[["GS",tot.gs],["IP",tot.ip],["ERA",tot.era],["K",tot.k],["BB",tot.bb],["H",tot.h]].map(([l,v])=>(
-              <div key={l} style={{ padding:"8px 10px", borderRight:`1px solid ${C.rule}` }}>
-                <div style={{ fontFamily:MONO, fontSize:9, letterSpacing:"0.08em",
+              <div key={l} style={{ padding:"8px 4px", borderRight:`1px solid ${C.rule}`,
+                minWidth:0, textAlign:"center" }}>
+                <div style={{ fontFamily:MONO, fontSize:9, letterSpacing:"0.06em",
                   textTransform:"uppercase", color:C.inkSoft }}>{l}</div>
-                <div style={{ fontFamily:MONO, fontSize:15, fontWeight:700 }}>{v}</div>
+                <div style={{ fontFamily:MONO, fontSize:14, fontWeight:700,
+                  whiteSpace:"nowrap" }}>{v}</div>
               </div>
             ))}
+          </div>
+        )}
+
+        {stretches && (
+          <div style={{ borderBottom:`1px solid ${C.rule}` }}>
+            <div style={{ padding:"7px 12px 4px", fontFamily:MONO, fontSize:9,
+              letterSpacing:"0.1em", textTransform:"uppercase", color:C.ruleDark }}>
+              Recent form · his best and worst run ending in his last start
+            </div>
+            {(stretches.flat
+              ? [["Recent", stretches.best, C.inkSoft]]
+              : [["Best", stretches.best, C.over], ["Worst", stretches.worst, C.under]]
+            ).map(([label, st, col]) => <StretchRow key={label} label={label} st={st} col={col} />)}
           </div>
         )}
 
