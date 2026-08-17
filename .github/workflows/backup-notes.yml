@@ -1,9 +1,10 @@
 name: Backup Notes Bin
 
+# The daily schedule is off: the fetch step was failing every morning, so the
+# run did nothing but post a red X. Manual dispatch is left in place, so the
+# backup can still be triggered from the Actions tab once the fetch is fixed.
 on:
-  schedule:
-    - cron: "0 9 * * *"   # daily at 09:00 UTC
-  workflow_dispatch:        # lets you trigger a backup manually from the Actions tab
+  workflow_dispatch:
 
 permissions:
   contents: write
