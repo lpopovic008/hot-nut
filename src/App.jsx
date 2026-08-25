@@ -5897,8 +5897,287 @@ function ResearchTab({ cal }) {
   );
 }
 
+/* ═══════════════════════════════ NFL ═══════════════════════════════
+   The MLB side runs on statsapi.mlb.com — official, free, no key. The NFL
+   publishes no equivalent, so this reads ESPN's public scoreboard endpoint:
+   also free and keyless, but undocumented and under no promise to stay
+   stable. Every field is optional-chained on the way in, so a shape change
+   degrades a card rather than blanking the page.
+
+   Football is weekly, so this is a week picker rather than the MLB side's
+   rolling date calendar — "yesterday / today / tomorrow" means nothing for
+   a sport that plays once a week. Same reason the MLB indicators don't
+   appear here: rest days, starting-pitcher ERA and back-to-back travel have
+   no football analogue, and the ones that would (line movement, snap counts,
+   injury report) need data this endpoint doesn't carry. */
+const NFL_API = "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard";
+
+const NFL_WEEKS = [
+  ...Array.from({ length:18 }, (_,i) => ({ seasontype:2, week:i+1 })),
+  { seasontype:3, week:1 }, { seasontype:3, week:2 },
+  { seasontype:3, week:3 }, { seasontype:3, week:5 },
+];
+const nflWeekLabel = (seasontype, week) =>
+  seasontype === 3
+    ? ({ 1:"Wild Card", 2:"Divisional", 3:"Conf. Champs", 4:"Pro Bowl", 5:"Super Bowl" }[week] || `Playoffs ${week}`)
+    : seasontype === 1 ? (week === 0 ? "Hall of Fame" : `Preseason ${week}`)
+    : `Week ${week}`;
+
+/* `sel` null means "whatever ESPN considers current" — the bare endpoint
+   answers with the live week, which saves guessing at it from the date. */
+async function loadNflWeek(sel) {
+  const url = sel
+    ? `${NFL_API}?dates=${sel.year}&seasontype=${sel.seasontype}&week=${sel.week}`
+    : NFL_API;
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`NFL scoreboard ${r.status}`);
+  const j = await r.json();
+
+  const games = (j.events || []).map(ev => {
+    const comp = ev.competitions?.[0] || {};
+    const cs = comp.competitors || [];
+    const side = (which) => {
+      const c = cs.find(x => x.homeAway === which) || {};
+      const t = c.team || {};
+      const recs = c.records || [];
+      return {
+        id: t.id ?? null,
+        abbr: t.abbreviation || t.shortDisplayName || "—",
+        name: t.shortDisplayName || t.displayName || "—",
+        score: c.score == null || c.score === "" ? null : Number(c.score),
+        record: recs.find(x => x.name === "overall")?.summary || recs[0]?.summary || null,
+        quarters: (c.linescores || []).map(q => Number(q?.value) || 0),
+      };
+    };
+    const st = comp.status?.type || ev.status?.type || {};
+    const odds = (comp.odds || [])[0] || {};
+    return {
+      id: ev.id,
+      date: ev.date || comp.date || null,
+      state: st.state || "pre",                       // pre | in | post
+      detail: st.shortDetail || st.description || "",
+      venue: comp.venue?.fullName || null,
+      network: (comp.broadcasts || [])[0]?.names?.[0] || null,
+      spread: odds.details || null,
+      total: odds.overUnder ?? null,
+      weather: comp.weather?.displayValue || null,
+      temp: comp.weather?.temperature ?? null,
+      home: side("home"), away: side("away"),
+    };
+  }).sort((a,b) => new Date(a.date || 0) - new Date(b.date || 0));
+
+  return {
+    games,
+    year: j.season?.year ?? sel?.year ?? new Date().getFullYear(),
+    seasontype: j.season?.type ?? sel?.seasontype ?? 2,
+    week: j.week?.number ?? sel?.week ?? 1,
+  };
+}
+
+const nflKickoff = (iso) => {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleString(undefined, { weekday:"short", hour:"numeric", minute:"2-digit" });
+};
+
+function NflTeamRow({ team, other, decided }) {
+  // once a game is final the loser drops back to the soft ink, so a glance
+  // down the column reads as a column of winners
+  const won = decided && team.score != null && other.score != null && team.score > other.score;
+  const dim = decided && !won;
+  return (
+    <div style={{ display:"flex", alignItems:"baseline", gap:8 }}>
+      <span style={{ fontFamily:SANS, fontSize:15, fontWeight: won ? 800 : 600,
+        color: dim ? C.inkSoft : C.ink, flex:1, minWidth:0,
+        overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{team.name}</span>
+      {team.record && (
+        <span style={{ fontFamily:MONO, fontSize:10.5, color:C.ruleDark, flexShrink:0 }}>{team.record}</span>
+      )}
+      <span style={{ fontFamily:MONO, fontSize:16, fontVariantNumeric:"tabular-nums",
+        fontWeight: won ? 700 : 500, color: dim ? C.inkSoft : C.ink,
+        minWidth:28, textAlign:"right", flexShrink:0 }}>
+        {team.score == null ? "–" : team.score}
+      </span>
+    </div>
+  );
+}
+
+function NflGameCard({ g }) {
+  const decided = g.state === "post";
+  const live = g.state === "in";
+  const meta = [
+    live || decided ? g.detail : nflKickoff(g.date),
+    g.network, g.venue,
+  ].filter(Boolean);
+  const market = [
+    g.spread,
+    g.total != null ? `O/U ${g.total}` : null,
+    g.weather ? (g.temp != null ? `${g.weather} ${g.temp}°` : g.weather) : null,
+  ].filter(Boolean);
+
+  return (
+    <div style={{ background:C.card, border:`1px solid ${live ? C.ink : C.rule}`,
+      borderRadius:2, padding:"11px 13px", display:"flex", flexDirection:"column", gap:7 }}>
+      <div style={{ display:"flex", alignItems:"center", gap:8, flexWrap:"wrap",
+        fontFamily:MONO, fontSize:10, letterSpacing:"0.1em", textTransform:"uppercase",
+        color: live ? C.under : C.ruleDark }}>
+        {live && <span aria-hidden="true" style={{ width:6, height:6, borderRadius:"50%",
+          background:C.under, display:"inline-block" }} />}
+        {meta.map((m,i) => <span key={i}>{i > 0 && <span style={{ color:C.rule }}> · </span>}{m}</span>)}
+      </div>
+      <div style={{ display:"flex", flexDirection:"column", gap:3 }}>
+        <NflTeamRow team={g.away} other={g.home} decided={decided} />
+        <NflTeamRow team={g.home} other={g.away} decided={decided} />
+      </div>
+      {market.length > 0 && (
+        <div style={{ fontFamily:MONO, fontSize:10.5, color:C.inkSoft,
+          borderTop:`1px solid ${C.rule}`, paddingTop:6 }}>
+          {market.join("  ·  ")}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function NflView() {
+  const [sel, setSel] = useState(null);      // null until ESPN tells us the current week
+  const [data, setData] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const load = useCallback(async (want) => {
+    setBusy(true); setErr("");
+    try {
+      const d = await loadNflWeek(want);
+      setData(d);
+      setSel({ year:d.year, seasontype:d.seasontype, week:d.week });
+    } catch (e) {
+      setErr(isNet(e.message)
+        ? "Couldn't reach the NFL scoreboard service. This works from a normal browser tab with an internet connection."
+        : e.message);
+    } finally { setBusy(false); }
+  }, []);
+
+  useEffect(() => { load(null); }, [load]);
+
+  const games = data?.games || [];
+
+  return (
+    <div>
+      <div style={{ display:"flex", alignItems:"center", gap:8, flexWrap:"wrap", marginBottom:16 }}>
+        <span style={{ fontFamily:SANS, fontSize:13, color:C.inkSoft }}>Week</span>
+        <select
+          className="ts-nfl-week" aria-label="NFL week"
+          value={sel ? `${sel.seasontype}-${sel.week}` : ""}
+          disabled={!sel || busy}
+          onChange={e => {
+            const [st, wk] = e.target.value.split("-").map(Number);
+            load({ year:sel.year, seasontype:st, week:wk });
+          }}
+          style={researchSelectStyle}>
+          {!sel && <option value="">…</option>}
+          {NFL_WEEKS.map(w => (
+            <option key={`${w.seasontype}-${w.week}`} value={`${w.seasontype}-${w.week}`}>
+              {nflWeekLabel(w.seasontype, w.week)}
+            </option>
+          ))}
+        </select>
+        {sel && (
+          <span style={{ fontFamily:MONO, fontSize:11, color:C.ruleDark }}>{sel.year} season</span>
+        )}
+        <button onClick={()=>load(sel)} disabled={busy}
+          style={{ ...researchSelectStyle, cursor: busy ? "default" : "pointer",
+            textTransform:"uppercase", letterSpacing:"0.08em", fontSize:11 }}>
+          {busy ? "Loading…" : "Refresh"}
+        </button>
+      </div>
+
+      {err && <ErrBox>{err}</ErrBox>}
+
+      {!err && !busy && data && games.length === 0 && (
+        <div style={{ fontFamily:SANS, fontSize:14, color:C.inkSoft, padding:"20px 0" }}>
+          No games scheduled for {nflWeekLabel(sel?.seasontype, sel?.week)}.
+        </div>
+      )}
+
+      {games.length > 0 && (
+        <>
+          <Eyebrow n="01">{nflWeekLabel(sel?.seasontype, sel?.week)}</Eyebrow>
+          <div className="ts-nfl-grid" style={{ display:"grid", gap:10,
+            gridTemplateColumns:"repeat(auto-fill, minmax(280px, 1fr))", marginBottom:26 }}>
+            {games.map(g => <NflGameCard key={g.id} g={g} />)}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+/* the MLB wordmark in the header doubles as the sport picker */
+function SportSwitcher({ sport, setSport }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    const onKey = (e) => { if (e.key === "Escape") setOpen(false); };
+    document.addEventListener("mousedown", onDoc);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDoc);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  return (
+    <div ref={ref} style={{ position:"relative" }}>
+      <button onClick={()=>setOpen(v=>!v)} aria-haspopup="menu" aria-expanded={open}
+        title="Switch sport"
+        style={{ display:"flex", alignItems:"center", gap:7, padding:0, border:"none",
+          background:"transparent", color:C.ink, cursor:"pointer", fontFamily:SANS,
+          fontWeight:800, fontSize:34, letterSpacing:"-0.02em", lineHeight:1 }}>
+        {sport.toUpperCase()}
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true"
+          style={{ transform: open ? "rotate(180deg)" : "none", flexShrink:0 }}>
+          <path d="M6 9l6 6 6-6" stroke={C.inkSoft} strokeWidth="2.6"
+            strokeLinecap="round" strokeLinejoin="round"/>
+        </svg>
+      </button>
+      {open && (
+        <div role="menu" style={{ position:"absolute", top:"calc(100% + 6px)", left:0, zIndex:60,
+          background:"#fff", border:`1px solid ${C.ink}`, borderRadius:2, minWidth:120,
+          boxShadow:"0 6px 18px rgba(0,0,0,0.18)", overflow:"hidden" }}>
+          {["mlb","nfl"].map(s => (
+            <button key={s} role="menuitem" onClick={()=>{ setSport(s); setOpen(false); }}
+              style={{ display:"block", width:"100%", textAlign:"left", padding:"9px 14px",
+                border:"none", background: s===sport ? C.ink : "transparent",
+                color: s===sport ? "#fff" : C.ink, cursor:"pointer",
+                fontFamily:MONO, fontSize:13, letterSpacing:"0.1em" }}>
+              {s.toUpperCase()}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function App() {
   const [tab, setTab] = useState("calendar");
+  const [sport, setSport] = useState(() => {
+    try { return localStorage.getItem("ts-sport") === "nfl" ? "nfl" : "mlb"; }
+    catch { return "mlb"; }
+  });
+  // the NFL view mounts on first visit and then stays mounted, same as the
+  // MLB tabs — but it must not fetch a scoreboard for someone who never
+  // opens it
+  const [nflSeen, setNflSeen] = useState(sport === "nfl");
+  const chooseSport = useCallback((s) => {
+    setSport(s);
+    if (s === "nfl") setNflSeen(true);
+    try { localStorage.setItem("ts-sport", s); } catch { /* private browsing */ }
+  }, []);
   const { tags, tagStatus, setTag, setResult, setStarred } = useTags();
   const [cal, setCal] = useState(null);   // { load, busy } from TravelTrends
   const [playsApi, setPlaysApi] = useState(null);   // { exportPlays, playsCopied } from TagsView
@@ -5906,12 +6185,13 @@ export default function App() {
   const dateBtnRef = useRef(null);   // the date picker positions itself off this
 
   useEffect(() => {
-    document.title = "MLB";
-  }, []);
+    document.title = sport.toUpperCase();
+  }, [sport]);
 
   // one shared camera-icon export button in the header — same look on both
   // tabs, wired to whichever tab's own export function is currently active
-  const exportFn = tab==="calendar" ? cal?.copySlate : tab==="tags" ? playsApi?.exportPlays : null;
+  const exportFn = sport!=="mlb" ? null
+    : tab==="calendar" ? cal?.copySlate : tab==="tags" ? playsApi?.exportPlays : null;
   const exportStatus = tab==="calendar" ? cal?.slateCopied : tab==="tags" ? playsApi?.playsCopied : null;
   const exportTitle = exportStatus==="empty"
     ? (tab==="calendar" ? "No tagged picks today — hit Play on a game first" : "No plays in this range to export")
@@ -5925,16 +6205,15 @@ export default function App() {
         <header style={{ borderBottom:`2px solid ${C.ink}`, paddingBottom:14, marginBottom:6 }}>
           <div style={{ fontFamily:MONO, fontSize:11, letterSpacing:"0.22em",
             textTransform:"uppercase", color:C.inkSoft }}>
-            Terminal · MLB live
-            {NOTES_URL && <span style={{ color:C.ruleDark }}> · tags {
+            Terminal · {sport.toUpperCase()} live
+            {sport==="mlb" && NOTES_URL && <span style={{ color:C.ruleDark }}> · tags {
               tagStatus==="loading" ? "syncing…" : tagStatus==="saving" ? "saving…"
               : tagStatus==="saved" ? "synced" : tagStatus==="error" ? "offline" : ""}</span>}
           </div>
           <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between",
             gap:16, flexWrap:"wrap", marginTop:6 }}>
             <div style={{ display:"flex", alignItems:"center", gap:12 }}>
-              <h1 style={{ margin:0, fontFamily:SANS, fontWeight:800, fontSize:34,
-                letterSpacing:"-0.02em", lineHeight:1 }}>MLB</h1>
+              <SportSwitcher sport={sport} setSport={chooseSport} />
               {exportFn && (
                 <button onClick={()=>exportFn()}
                   aria-label={tab==="calendar" ? "Copy today's slate" : "Export track record"}
@@ -5966,7 +6245,7 @@ export default function App() {
                   )}
                 </button>
               )}
-              {tab==="calendar" && cal && cal.setShowIndicators && (
+              {sport==="mlb" && tab==="calendar" && cal && cal.setShowIndicators && (
                 <button onClick={()=>cal.setShowIndicators(v=>!v)}
                   aria-label={cal.showIndicators ? "Hide indicators" : "Show indicators"}
                   title={cal.showIndicators ? "Hide indicators" : "Show indicators"}
@@ -5992,6 +6271,7 @@ export default function App() {
               )}
             </div>
             <div style={{ display:"flex", alignItems:"center", gap:8, flexWrap:"wrap" }}>
+              {sport==="mlb" && <>
               <div style={{ position:"relative" }}>
                 <button ref={dateBtnRef} onClick={()=>{
                     if (tab!=="calendar") { setTab("calendar"); setShowDatePicker(false); return; }
@@ -6023,6 +6303,7 @@ export default function App() {
                 background:tab==="research"?C.ink:"transparent", color:tab==="research"?"#fff":C.inkSoft,
                 fontFamily:MONO, fontSize:12, letterSpacing:"0.08em", textTransform:"uppercase",
                 cursor:"pointer" }}>RESEARCH</button>
+              </>}
             </div>
           </div>
         </header>
@@ -6031,25 +6312,39 @@ export default function App() {
         {/* both views stay mounted always — hidden with CSS rather than
             unmounted — so switching tabs never throws away the calendar's
             already-loaded schedule/stats and forces a refetch */}
-        <div style={{ display: tab==="tags" ? "block" : "none" }}>
-          <TagsView tags={tags} setResult={setResult} setStarred={setStarred} onReady={setPlaysApi} />
+        <div style={{ display: sport==="mlb" ? "block" : "none" }}>
+          <div style={{ display: tab==="tags" ? "block" : "none" }}>
+            <TagsView tags={tags} setResult={setResult} setStarred={setStarred} onReady={setPlaysApi} />
+          </div>
+          <div style={{ display: tab==="calendar" ? "block" : "none" }}>
+            <TravelTrends tags={tags} setTag={setTag} onReady={setCal} />
+          </div>
+          <div style={{ display: tab==="research" ? "block" : "none" }}>
+            <ResearchTab cal={cal} />
+          </div>
         </div>
-        <div style={{ display: tab==="calendar" ? "block" : "none" }}>
-          <TravelTrends tags={tags} setTag={setTag} onReady={setCal} />
-        </div>
-        <div style={{ display: tab==="research" ? "block" : "none" }}>
-          <ResearchTab cal={cal} />
-        </div>
+        {nflSeen && (
+          <div style={{ display: sport==="nfl" ? "block" : "none" }}>
+            <NflView />
+          </div>
+        )}
 
         <footer style={{ marginTop:40, paddingTop:14, borderTop:`1px solid ${C.rule}`,
           fontFamily:MONO, fontSize:10.5, color:C.ruleDark, lineHeight:1.7 }}>
-          Stats & schedule: MLB Stats API (free, no key). Click any game for lineups, the
-          probable starters’ history vs the opponent, and the season head-to-head. Lineups are
-          confirmed only a few hours pre-game; before that they’re projected from each team’s
-          last batting order.
+          {sport==="mlb" ? <>
+            Stats &amp; schedule: MLB Stats API (free, no key). Click any game for lineups, the
+            probable starters’ history vs the opponent, and the season head-to-head. Lineups are
+            confirmed only a few hours pre-game; before that they’re projected from each team’s
+            last batting order.
+          </> : <>
+            Scores &amp; schedule: ESPN’s public NFL scoreboard (free, no key, undocumented).
+            The NFL publishes no equivalent of the MLB Stats API, so this endpoint is
+            unofficial and can change without notice. Spread, total and weather appear when
+            ESPN carries them for a game.
+          </>}
         </footer>
       </div>
-      {tab==="calendar" && cal && !cal.modalOpen && (
+      {sport==="mlb" && tab==="calendar" && cal && !cal.modalOpen && (
         <button onClick={()=>cal.load && cal.load()} disabled={cal.busy}
           aria-label="Refresh" title="Refresh schedule & stats"
           style={{ position:"fixed", bottom:20, right:20, zIndex:40,
