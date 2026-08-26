@@ -795,6 +795,31 @@ function recentStretches(starts) {
   return { best, worst, flat: best.len===worst.len };
 }
 
+/* Which way a starter's recent form is running — the tint behind his WHIP on
+   the calendar.
+
+   Both runs recentStretches finds end at his last start, so the shorter one
+   is nested inside the longer one and is therefore the more recent of the
+   two. That makes its length the whole answer: three sharp starts sitting
+   inside ten ragged ones means he has turned it around lately, and ten sharp
+   ones holding a rough last three means he is sliding. Equal lengths is a
+   single flat run in both directions, which says nothing, so it stays plain.
+
+   Reads the game log already cached for the ERA number, so no extra fetch. */
+function pitcherFormTrend(list) {
+  if (!list?.length) return null;
+  // faced[] keeps the log in whatever order the API sent it; recentStretches
+  // wants newest first, since it walks prefixes back from the last start
+  const rows = list.slice().sort((a,b)=>String(b.date||"").localeCompare(String(a.date||"")));
+  // relief outings aren't form for a starter — same rule the pitcher log uses,
+  // including its fallback when the response carries no gamesStarted at all
+  const known = rows.some(s => s.stat?.gamesStarted != null);
+  const starts = known ? rows.filter(s => Number(s.stat?.gamesStarted) > 0) : rows;
+  const st = recentStretches(starts);
+  if (!st || st.flat) return null;
+  return st.best.len < st.worst.len ? "up" : "down";
+}
+
 // colors one pitcher start's IP/H/ER/BB/K line relative to the pitcher's own
 // season pace (or fixed fallback thresholds if no season data exists yet).
 // Shared by PLine's rendering and the pitcher-rematch verdict below, which
@@ -1988,6 +2013,12 @@ function TravelTrends({ tags, setTag, onReady }) {
       const w = pid ? faced[pid]?.season?.whip : null;
       return w!=null ? w : null;
     };
+    // "up" / "down" / null — tints that same WHIP number by whether his recent
+    // starts have been trending better or worse (see pitcherFormTrend)
+    const pitcherForm = (tid) => {
+      const pid = tid===g.awayId ? g.awayPid : tid===g.homeId ? g.homePid : null;
+      return pid ? pitcherFormTrend(faced[pid]?.list) : null;
+    };
     // the OTHER side's probable starter's ERA — who this team is actually
     // about to face today (used by the Shutout indicator below to judge
     // whether they're staring down a good pitcher).
@@ -2208,6 +2239,7 @@ function TravelTrends({ tags, setTag, onReady }) {
       rematchCount:(tid)=>rematchCount[tid] || 0,
       pitcherEra,
       pitcherWhip,
+      pitcherForm,
       bigDayStreak,
       shutoutStreak,
       hitsLine };
@@ -2754,16 +2786,26 @@ function LiveDiamond({ inningNum, inningState, outs, onFirst, onSecond, onThird,
    now, alongside that game's trend indicators. */
 function pitcherBatterStats(t, tid) {
   return { era: t.pitcherEra(tid), whip: t.pitcherWhip?.(tid) ?? null,
+    form: t.pitcherForm?.(tid) ?? null,
     verdict: t.rematchVerdict(tid) };
 }
-/* WHIP sits to the left of the ERA and stays a plain number: the soft
-   rematch-verdict fill belongs to one figure, and doubling it across both
-   would read as two separate verdicts rather than one. */
-function WhipNum({ whip, dark }) {
+/* WHIP sits to the left of the ERA, carrying its own soft fill: green when
+   his recent starts have been trending better, red when worse. That's a
+   different question from the ERA's rematch verdict beside it — form over
+   his last few starts, not how he fared against tonight's opponent — so the
+   two fills never mean the same thing even when they match. */
+function WhipNum({ whip, form, dark }) {
   const has = whip != null;
+  const fill = !has || !form ? null
+    : form==="up" ? (dark?C.darkSoftOver:C.softOver)
+    : (dark?C.darkSoftUnder:C.softUnder);
   return (
-    <span title="Season WHIP" style={{ width:WHIP_BOX_W, flexShrink:0, textAlign:"center",
+    <span title={has
+        ? `Season WHIP${form ? ` · recent starts trending ${form==="up"?"better":"worse"}` : ""}`
+        : "Season WHIP"}
+      style={{ width:WHIP_BOX_W, flexShrink:0, textAlign:"center",
       fontFamily:MONO, fontSize:8, fontWeight:700, whiteSpace:"nowrap",
+      background: fill || "transparent", borderRadius: fill ? 2 : 0,
       color: has ? (dark?C.darkText:C.ink) : (dark?C.darkTextSoft:C.ruleDark) }}>
       {has ? <TightDecimal text={whip.toFixed(2)} /> : "–"}</span>
   );
@@ -2771,7 +2813,7 @@ function WhipNum({ whip, dark }) {
 function PBBoxRow({ s, dark }) {
   return (
     <span style={{ display:"flex", alignItems:"center", gap:PB_GAP, flexShrink:0 }}>
-      <WhipNum whip={s.whip} dark={dark} />
+      <WhipNum whip={s.whip} form={s.form} dark={dark} />
       <EraNum era={s.era} verdict={s.verdict} dark={dark} />
     </span>
   );
