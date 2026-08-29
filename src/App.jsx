@@ -1392,8 +1392,8 @@ function TravelTrends({ tags, setTag, onReady }) {
             (byTeamDate[tid] = byTeamDate[tid]||{})[d.date] = venueTz; });
           // gamePk (not just date) identifies the exact game — a doubleheader
           // puts two of these in a row for the same team on the same date
-          if (hp?.id) (scheduleByTeam[away.id] = scheduleByTeam[away.id]||[]).push({ date:d.date, time:g.gameDate, gamePk:g.gamePk, oppPid:hp.id, isFinal, side:"away" });
-          if (ap?.id) (scheduleByTeam[home.id] = scheduleByTeam[home.id]||[]).push({ date:d.date, time:g.gameDate, gamePk:g.gamePk, oppPid:ap.id, isFinal, side:"home" });
+          if (hp?.id) (scheduleByTeam[away.id] = scheduleByTeam[away.id]||[]).push({ date:d.date, time:g.gameDate, gamePk:g.gamePk, oppPid:hp.id, isFinal, isLive, side:"away" });
+          if (ap?.id) (scheduleByTeam[home.id] = scheduleByTeam[home.id]||[]).push({ date:d.date, time:g.gameDate, gamePk:g.gamePk, oppPid:ap.id, isFinal, isLive, side:"home" });
         });
       });
       Object.values(scheduleByTeam).forEach(list=>list.sort((a,b)=>a.time.localeCompare(b.time)));
@@ -1557,9 +1557,14 @@ function TravelTrends({ tags, setTag, onReady }) {
       const lr = await fetch(`${API}/schedule?sportId=1&startDate=${lbFrom}&endDate=${lbTo}` +
         `&gameType=R&hydrate=linescore`);
       const lj = await lr.json();
-      const finals = (lj.dates||[]).flatMap(d=>d.games||[])
-        .filter(g=>g.status?.abstractGameState==="Final")
+      // A game in progress still has a batting line worth scoring — it just
+      // reads as though the game ended right now — so the last-5 batting trio
+      // counts it. Streaks and the Big Day box are claims about a finished
+      // result, though, so those keep working off `finals` alone.
+      const played = (lj.dates||[]).flatMap(d=>d.games||[])
+        .filter(g=>{ const s = g.status?.abstractGameState; return s==="Final" || s==="Live"; })
         .sort((a,b)=>a.gameDate.localeCompare(b.gameDate));
+      const finals = played.filter(g=>g.status?.abstractGameState==="Final");
       const byTeamRes = {};    // teamId -> [{date,res}]
       const teamName = {};
       const runsByDate = {};   // teamId -> { gameTime -> runs scored }
@@ -1575,23 +1580,27 @@ function TravelTrends({ tags, setTag, onReady }) {
                                // by date alone would let the second game silently
                                // overwrite the first instead of both counting as
                                // separate "previous games."
-      finals.forEach(g=>{
+      played.forEach(g=>{
+        const isFinal = g.status?.abstractGameState==="Final";
         ["home","away"].forEach(side=>{
           const t = g.teams[side];
-          if (typeof t.isWinner !== "boolean") return;
           teamName[t.team.id] = t.team.name;
-          (byTeamRes[t.team.id] = byTeamRes[t.team.id]||[])
-            .push({ date:g.gameDate, res: t.isWinner ? "W":"L" });
-          const runs = Number(t.score);
-          if (!isNaN(runs)) {
-            const m = runsByDate[t.team.id] = runsByDate[t.team.id]||{};
-            m[g.gameDate] = runs;
+          // W/L and runs-scored are settled-game facts; a live game has
+          // neither yet, and isWinner is only a boolean once it's over
+          if (isFinal && typeof t.isWinner === "boolean") {
+            (byTeamRes[t.team.id] = byTeamRes[t.team.id]||[])
+              .push({ date:g.gameDate, res: t.isWinner ? "W":"L" });
+            const runs = Number(t.score);
+            if (!isNaN(runs)) {
+              const m = runsByDate[t.team.id] = runsByDate[t.team.id]||{};
+              m[g.gameDate] = runs;
+            }
           }
           const hits = Number(g.linescore?.teams?.[side]?.hits);
           if (!isNaN(hits)) {
             const hm = hitsByDate[t.team.id] = hitsByDate[t.team.id]||{};
             hm[g.gameDate] = hits;
-            (gamePkByDate[t.team.id] = gamePkByDate[t.team.id]||{})[g.gameDate] = { gamePk:g.gamePk, side };
+            (gamePkByDate[t.team.id] = gamePkByDate[t.team.id]||{})[g.gameDate] = { gamePk:g.gamePk, side, isFinal };
             const oppId = g.teams[side==="home"?"away":"home"].team.id;
             (oppByDate[t.team.id] = oppByDate[t.team.id]||{})[g.gameDate] = oppId;
           }
@@ -1606,9 +1615,11 @@ function TravelTrends({ tags, setTag, onReady }) {
       Object.entries(gamePkByDate).forEach(([tid, games])=>{
         const list = scheduleByTeam[tid] = scheduleByTeam[tid] || [];
         const known = new Set(list.map(s=>s.gamePk));
-        Object.entries(games).forEach(([time, { gamePk, side }])=>{
-          // every entry here comes from the completed-games (`finals`) list
-          if (!known.has(gamePk)) list.push({ date:time.slice(0,10), time, gamePk, oppPid:null, isFinal:true, side });
+        Object.entries(games).forEach(([time, { gamePk, side, isFinal }])=>{
+          // these come off the played list, which is finals plus games still
+          // in progress — carry that through so the batting line knows which
+          // box scores are safe to cache
+          if (!known.has(gamePk)) list.push({ date:time.slice(0,10), time, gamePk, oppPid:null, isFinal, isLive: !isFinal, side });
         });
       });
       Object.values(scheduleByTeam).forEach(list=>list.sort((a,b)=>a.time.localeCompare(b.time)));
@@ -1779,22 +1790,47 @@ function TravelTrends({ tags, setTag, onReady }) {
     const need = (teamIds||[]).filter(tid => tid!=null && !battingLineFetchedRef.current.has(tid));
     if (!need.length) return;
     need.forEach(tid => battingLineFetchedRef.current.add(tid));
+    // any bail-out has to hand the team back, or one attempt made before the
+    // schedule had loaded would mark it "fetched" and blank its whole line for
+    // the rest of the session
+    const release = (tids) => tids.forEach(tid => battingLineFetchedRef.current.delete(tid));
     try {
-      const perTeamGames = {};   // tid -> last 5 prior finals, each {gamePk, time, side}
+      const perTeamGames = {};   // tid -> the same 5 prior games hitsLine shows
       const gamePkSet = new Set();
+      let sawLive = false;
       need.forEach(tid => {
-        const sched = (scheduleMap[tid]||[])
-          .filter(s => s.isFinal && s.side && s.time < beforeTime)
-          .sort((a,b) => b.time.localeCompare(a.time))
-          .slice(0, 5);
-        perTeamGames[tid] = sched;
-        sched.forEach(s => gamePkSet.add(s.gamePk));
+        // Pick the games off hitsMap, not off the schedule, because hitsMap is
+        // exactly what hitsLine renders from. Selecting from a different list
+        // let the two drift apart — a game the schedule had but hitsMap didn't
+        // pushed the scored set one game deeper than the displayed set, and
+        // the oldest cell came up empty even though nothing had failed.
+        const byTime = new Map((scheduleMap[tid]||[]).map(s => [s.time, s]));
+        perTeamGames[tid] = Object.keys(hitsMap[tid] || {})
+          .filter(t => t < beforeTime)
+          .sort().reverse().slice(0, 5)
+          .map(time => {
+            const s = byTime.get(time);
+            return s && s.side ? { gamePk:s.gamePk, time, side:s.side, isFinal:!!s.isFinal } : null;
+          })
+          .filter(Boolean);
+        perTeamGames[tid].forEach(s => {
+          gamePkSet.add(s.gamePk);
+          if (!s.isFinal) sawLive = true;
+        });
       });
-      if (!gamePkSet.size) return;
+      // nothing to work with yet — the schedule or hits map hasn't landed.
+      // Release, so the retry that follows those arriving actually runs.
+      if (!gamePkSet.size) { release(need); return; }
+      const settled = {};    // gamePk -> safe to cache (game is over)
+      Object.values(perTeamGames).flat().forEach(s => {
+        if (!s.isFinal) settled[s.gamePk] = false;                    // sticks
+        else if (settled[s.gamePk] === undefined) settled[s.gamePk] = true;
+      });
       const boxCache = {};   // gamePk -> { away:[{pid,name,stat}], home:[...] }
       await mapPool([...gamePkSet], 4, async (gamePk) => {
-        // every game reaching here came off the completed-games list
-        const bx = await loadBoxscorePitchers(gamePk, true);
+        // a game still in progress must not be cached — its box score is still
+        // moving, and the score should follow it on the next refresh
+        const bx = await loadBoxscorePitchers(gamePk, !!settled[gamePk]);
         if (bx) boxCache[gamePk] = bx;
       });
       const pitcherSeasonCache = {};   // pid -> { h9, bb9, hr9, doubles9, triples9 }
@@ -1853,13 +1889,16 @@ function TravelTrends({ tags, setTag, onReady }) {
       });
       // let a still-incomplete team retry the next time its modal opens,
       // rather than being marked "fetched" forever after this one partial pass
-      incomplete.forEach(tid => battingLineFetchedRef.current.delete(tid));
+      release([...incomplete]);
+      // a live game's score keeps moving, so this team is never "done" —
+      // reopening or refreshing recomputes it off the current box score
+      if (sawLive) release(need);
     } catch {
       // a failed lazy fetch just leaves those teams' batting line blank —
       // let the viewer retry by reopening the modal, rather than looping
-      need.forEach(tid => battingLineFetchedRef.current.delete(tid));
+      release(need);
     }
-  }, [scheduleMap]);
+  }, [scheduleMap, hitsMap]);
 
   // on mobile, scroll the calendar so today's column is in view on first load
   const calRef = useRef(null);
