@@ -70,17 +70,6 @@ const TEAM_TZ = {
   143:"ET",144:"ET",145:"CT",146:"ET",147:"ET",158:"CT",
 };
 const TZ_RANK = { PT:0, MT:1, CT:2, ET:3 };
-/* TEMPORARY — supports the extras-then-matinee test indicator below; remove
-   with it. Offsets are the daylight-saving ones, which hold for every date in
-   the regular season. Arizona keeps standard time year round and so runs an
-   hour off here, which is close enough for judging "night game" vs "day game". */
-const TZ_UTC_OFFSET = { ET:-4, CT:-5, MT:-6, PT:-7 };
-const localStartHour = (iso, tz) => {
-  const off = TZ_UTC_OFFSET[tz];
-  if (off==null || !iso) return null;
-  const d = new Date(iso);
-  return isNaN(d) ? null : (d.getUTCHours() + off + 24) % 24;
-};
 const TEAM_ABBR = {
   108:"LAA",109:"ARI",110:"BAL",111:"BOS",112:"CHC",113:"CIN",114:"CLE",115:"COL",
   116:"DET",117:"HOU",118:"KC",119:"LAD",120:"WSH",121:"NYM",133:"ATH",134:"PIT",
@@ -1407,27 +1396,7 @@ function TravelTrends({ tags, setTag, onReady }) {
             if (prevTz!=null && todayTz===TZ_RANK.ET && prevTz<=westThreshold)
               travelers.push({ teamId:tid, tname, from:byTeamDate[tid][prev], to:g.venueTz });
           });
-          /* ── TEMPORARY TEST INDICATOR — extras-then-matinee ──────────────
-             A team that played a night game which ran into extra innings and
-             is back out for a matinee today: latest possible finish, earliest
-             possible start. Piggybacks on the B2B travel slot rather than
-             taking a box of its own, so nothing about the grid changes — the
-             only tell is the box's hover title (see travelKind). Delete this
-             block, travelKind, TZ_UTC_OFFSET/localStartHour and the `grinders`
-             references in computeGameTrends to remove it cleanly. */
-          const todayStart = localStartHour(g.time, g.venueTz);
-          const grinders = [];
-          if (todayStart!=null && todayStart < 16) {
-            [["away",g.awayId,g.awayName],["home",g.homeId,g.homeName]].forEach(([,tid,tname])=>{
-              const last = (dayGames[prev]||[]).find(p => p.awayId===tid || p.homeId===tid);
-              if (!last || !last.isFinal) return;
-              const innings = Number(last.inningNum)||0;
-              const lastStart = localStartHour(last.time, last.venueTz);
-              if (innings >= 10 && lastStart!=null && lastStart >= 17)
-                grinders.push({ teamId:tid, tname, innings, lastStart, todayStart });
-            });
-          }
-          return { ...g, travelers, grinders, flagged:travelers.length>0 };
+          return { ...g, travelers, flagged:travelers.length>0 };
         }).sort((a,b)=>a.time.localeCompare(b.time));
       };
 
@@ -2242,8 +2211,6 @@ function TravelTrends({ tags, setTag, onReady }) {
     const yesterday = addDays(date,-1);
     const playedYesterday = (tid) => (scheduleMap[tid]||[]).some(s=>s.date===yesterday && s.isFinal);
     const travelersY = (g.travelers||[]).filter(x=>playedYesterday(x.teamId));
-    // TEMPORARY test indicator — shares the B2B travel box (see buildList)
-    const grindersY = (g.grinders||[]).filter(x=>playedYesterday(x.teamId));
     const echoY = echo.filter(e=>playedYesterday(e.teamId));
     const cbY = cb.filter(c=>playedYesterday(c.teamId));
     const bigdayY = bigday.filter(b=>playedYesterday(b.teamId));
@@ -2253,7 +2220,6 @@ function TravelTrends({ tags, setTag, onReady }) {
     const sideKeys = { [g.awayId]:new Set(), [g.homeId]:new Set() };
     const add = (tid, key) => { if (sideKeys[tid]) sideKeys[tid].add(key); };
     travelersY.forEach(x=>add(x.teamId, "travel"));
-    grindersY.forEach(x=>add(x.teamId, "travel"));   // TEMPORARY
     echoY.forEach(e=>add(e.teamId, "echo"));
     cbY.forEach(c=>add(c.teamId, "late"));
     bigdayY.forEach(b=>add(b.teamId, "bigday"));
@@ -2262,16 +2228,10 @@ function TravelTrends({ tags, setTag, onReady }) {
     reality.forEach(x=>add(x.teamId, "gauntlet"));   // opposite extreme, same box
     formerTeam.forEach(x=>add(x.teamId, "formerTeam"));
 
-    const any = travelersY.length>0 || echoY.length>0 || cbY.length>0 || rematch.length>0 || bigdayY.length>0 || shutoutY.length>0 || gauntlet.length>0 || reality.length>0 || formerTeam.length>0 || grindersY.length>0;
+    const any = travelersY.length>0 || echoY.length>0 || cbY.length>0 || rematch.length>0 || bigdayY.length>0 || shutoutY.length>0 || gauntlet.length>0 || reality.length>0 || formerTeam.length>0;
     return { travel:travelersY.length>0, travelers:travelersY, echo:echoY, cb:cbY, rematch, bigday:bigdayY, shutout:shutoutY, gauntlet, reality, formerTeam, any,
       keysFor:(tid)=>sideKeys[tid] || new Set(),
       gauntletKind,
-      // TEMPORARY — which of the two conditions lit that team's B2B box, so
-      // the hover title can say. Nothing else reads this.
-      travelKind:(tid)=>{
-        const gr = grindersY.find(x=>x.teamId===tid);
-        return gr ? `TEST · extras last night (${gr.innings} inn), day game today` : null;
-      },
       bigDayKind,
       rematchTier:(tid)=>rematchTier[tid] || null,
       rematchVerdict:(tid)=>rematchVerdict[tid] || null,
@@ -2917,13 +2877,8 @@ function StatsRow({ tid, t, dark }) {
           const inner = slot.key!=="bigday" ? null
             : kind==="zero" ? (t.shutoutStreak(tid) ? "!" : null)
             : t.bigDayStreak(tid) ? "!" : null;
-          // TEMPORARY: the B2B box is doubling as the extras-then-matinee test,
-          // so its hover title says which condition lit it. Look only, no style.
-          const title = !present ? undefined
-            : slot.key==="travel" ? (t.travelKind?.(tid) || s.label)
-            : s.label;
           return <TrendBox key={slot.key} present={present} color={s.color} inner={inner}
-            title={title} dark={dark} />;
+            title={present ? s.label : undefined} dark={dark} />;
         })}
       </div>
     </div>
