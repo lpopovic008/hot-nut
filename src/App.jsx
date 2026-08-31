@@ -687,7 +687,37 @@ function combinedProduction9(rates) {
 }
 // roughly modern-MLB league-average rates, used only when a pitcher's or
 // team's own season log isn't available yet.
-const LEAGUE_AVG_RATES = { h9:8.7, bb9:3.1, hr9:1.2, doubles9:1.6, triples9:0.15, k9:8.6 };
+const LEAGUE_AVG_RATES = { h9:8.7, bb9:3.1, hr9:1.2, doubles9:1.6, triples9:0.15, k9:8.6, r9:4.4 };
+
+/* ── the pitcher score's own currency ────────────────────────────────────
+   The batting score above measures total bases produced. A pitcher is judged
+   on a different, smaller set: hits allowed, earned runs, walks, strikeouts.
+   Earned runs carry the most weight, being the only one of the four that is
+   the actual result rather than a step toward it; a walk sits just under a
+   hit, putting the same man on with no chance of extra bases; strikeouts are
+   a credit against the rest. Extra-base hits aren't counted separately —
+   their damage already lands in the earned-run column. */
+const PITCH_W = { er:2.0, h:1.0, bb:0.9, k:0.6 };
+function pitcherDamage(stat) {
+  return PITCH_W.er * (Number(stat?.earnedRuns)||0)
+    + PITCH_W.h  * (Number(stat?.hits)||0)
+    + PITCH_W.bb * (Number(stat?.baseOnBalls)||0)
+    - PITCH_W.k  * (Number(stat?.strikeOuts)||0);
+}
+// the same figure as a rate, for the lineup he faced: what that offense's own
+// season pace would be expected to do to a league-average arm over nine
+function pitcherDamage9(rates) {
+  return PITCH_W.er * (rates.r9 ?? LEAGUE_AVG_RATES.r9)
+    + PITCH_W.h  * (rates.h9||0)
+    + PITCH_W.bb * (rates.bb9||0)
+    - PITCH_W.k  * (rates.k9||0);
+}
+const PITCH_PAR9 = pitcherDamage9(LEAGUE_AVG_RATES);
+// Calibrated so a good start — 6 innings, 4 hits, 1 earned run, 1 walk, 7
+// strikeouts — lands on 7.0, the same place the batting score puts a good
+// night. Dropping total bases shrank the quantity's natural swing, so this
+// runs wider than the batting spread to keep the range open.
+const PITCH_SPREAD9 = 11.3;
 // league-average production per nine — the anchor 5.0 sits on
 const PROD_PAR9 = combinedProduction9(LEAGUE_AVG_RATES);
 // roughly one standard deviation of team-game production, and the unit the
@@ -709,12 +739,14 @@ const SCORE_SLOPE = Math.log(7/3) / SCORE_EDGE;
 // log-ratio could not (strikeouts can push production below zero).
 // `invert` flips which direction "doing well" means: a batter wants
 // production above expectation, a pitcher wants to allow less than it.
-function qualityScore(actual, expected, invert=false) {
+// `par9`/`spread9` let the pitcher score run on its own currency (see
+// pitcherDamage) without disturbing the batting score's calibration.
+function qualityScore(actual, expected, invert=false, par9=PROD_PAR9, spread9=PROD_SPREAD9) {
   if (!(expected>0)) return null;
   // the spread grows with how much of a game is being judged, but sublinearly:
   // production is a sum of many small events, so its swing scales with the
   // square root of the innings behind it rather than with the innings
-  const spread = PROD_SPREAD9 * Math.sqrt(expected / PROD_PAR9);
+  const spread = spread9 * Math.sqrt(expected / par9);
   const gap = invert ? expected-actual : actual-expected;
   const score = 10 / (1 + Math.exp(-SCORE_SLOPE * gap/spread));
   return Number.isFinite(score) ? score : null;
@@ -3813,6 +3845,8 @@ async function loadTeamSeasonHitting(teamId) {
       hr9: Number(stat.homeRuns||0)/gp,
       doubles9: Number(stat.doubles||0)/gp,
       triples9: Number(stat.triples||0)/gp,
+      // runs per game — the earned-run half of the pitcher score's expectation
+      r9: Number(stat.runs||0)/gp,
     };
   } catch { return null; }
 }
@@ -3843,15 +3877,22 @@ async function loadPitcherSeasonRates(pid) {
     });
   } catch { return null; }
 }
-// how a single start graded against the lineup a pitcher actually faced —
-// the mirror image of the batting score: 5.0 is exactly what that lineup's
-// own season rates predict a league-average pitcher allows them; higher is
-// a pitcher who allowed LESS than that (invert:true — see qualityScore).
+/* How a single start graded against the lineup a pitcher actually faced.
+   5.0 is exactly what that lineup's own season rates predict a league-average
+   arm gives up; higher means he allowed LESS than that (invert:true).
+
+   Built from four counting stats only — earned runs, hits, walks, strikeouts,
+   weighted by impact (see PITCH_W). Innings pitched is not one of the inputs,
+   but it does set the bar: six innings of work is expected to yield more of
+   all four than three innings are, so the comparison is against that lineup's
+   pace over however long he was actually out there. Without it a pitcher
+   pulled after two clean innings would outrank one who went seven. */
 function pitcherScoreForStart(stat, oppRates) {
   const trueIP = ipToOuts(stat?.inningsPitched)/3;
   if (!trueIP) return null;
-  return qualityScore(combinedProduction(stat),
-    combinedProduction9(oppRates || LEAGUE_AVG_RATES)/9*trueIP, true);
+  return qualityScore(pitcherDamage(stat),
+    pitcherDamage9(oppRates || LEAGUE_AVG_RATES)/9*trueIP, true,
+    PITCH_PAR9, PITCH_SPREAD9);
 }
 // this team's most recent completed game before `beforeDate` — its own
 // quality-adjusted batting score (a plain league-average baseline here,
