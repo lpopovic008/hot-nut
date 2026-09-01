@@ -3,7 +3,7 @@ import {
   ComposedChart, Bar, Line, XAxis, YAxis, ReferenceLine,
   Tooltip, ResponsiveContainer, Cell,
 } from "recharts";
-import hotNutLogo from "./assets/hot-nut-logo.png";
+import markLogo from "./assets/no-juice-logo.png";
 
 /* ───────────────────────────── palette ─────────────────────────────
    Box-score / stat-sheet identity. Cool newsprint paper, ink-black
@@ -937,10 +937,10 @@ function drawGreenTag(x, text, leftX, cy, maxW, fontSize = 14, color = "#39D98A"
 // copyCanvas() call (see its own comment) — Safari/iOS only honors the
 // clipboard write as a direct user gesture if nothing async (like awaiting
 // an image load) happens in between, so the logo has to already be ready.
-const hotNutLogoImg = (() => {
+const markLogoImg = (() => {
   if (typeof Image === "undefined") return null;
   const img = new Image();
-  img.src = hotNutLogo;
+  img.src = markLogo;
   return img;
 })();
 
@@ -954,9 +954,18 @@ function roundedRectPath(x, left, top, w, h, r) {
 // on an exported card row — skipped silently if the image hasn't finished
 // decoding yet (only possible if export is clicked within moments of the
 // page loading).
+//
+// Clipped to a circle: the mark is a round device on its own dark ground, and
+// these get drawn onto both the light slate background and the dark game
+// cards, so a square tile would read as a stray block on one of them.
 function drawLogoIcon(x, centerX, centerY, size) {
-  if (!hotNutLogoImg || !hotNutLogoImg.complete || !hotNutLogoImg.naturalWidth) return;
-  x.drawImage(hotNutLogoImg, centerX - size/2, centerY - size/2, size, size);
+  if (!markLogoImg || !markLogoImg.complete || !markLogoImg.naturalWidth) return;
+  x.save();
+  x.beginPath();
+  x.arc(centerX, centerY, size/2, 0, Math.PI*2);
+  x.clip();
+  x.drawImage(markLogoImg, centerX - size/2, centerY - size/2, size, size);
+  x.restore();
 }
 
 // a play's grade indicator box: empty outline until graded, then filled
@@ -5019,7 +5028,7 @@ function PlayStarBox({ starred, onToggle, size = 22 }) {
         background: starred ? C.ink : "#fff",
         display:"flex", alignItems:"center", justifyContent:"center",
         overflow:"hidden", padding:0 }}>
-      {starred && <img src={hotNutLogo} alt="" style={{ width:"100%", height:"100%", objectFit:"cover" }} />}
+      {starred && <img src={markLogo} alt="" style={{ width:"100%", height:"100%", objectFit:"cover" }} />}
     </button>
   );
 }
@@ -5235,7 +5244,7 @@ function TagsView({ tags, setResult, setStarred, onReady }) {
                 background: onlyStarred?"#fff":"transparent", opacity: onlyStarred?1:0.55,
                 display:"flex", alignItems:"center", justifyContent:"center",
                 overflow:"hidden", padding: onlyStarred?2:0 }}>
-              <img src={hotNutLogo} alt="" style={{ width:"100%", height:"100%", objectFit:"cover", borderRadius:"50%" }} />
+              <img src={markLogo} alt="" style={{ width:"100%", height:"100%", objectFit:"cover", borderRadius:"50%" }} />
             </button>
             <div style={{ display:"flex", gap:3, flexWrap:"wrap" }}>
               {FILTERS.map(([id,lbl])=>(
