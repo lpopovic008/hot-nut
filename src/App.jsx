@@ -5035,7 +5035,7 @@ function PlayStarBox({ starred, onToggle, size = 22 }) {
 
 /* ════════════════════════ TAGS VIEW ════════════════════════ */
 function TagsView({ tags, setResult, setStarred, onReady }) {
-  const [range, setRange] = useState("all");   // all|month|lastmonth|7d|30d
+  const [range, setRange] = useState("all");   // all|yesterday|month|lastmonth|7d|30d
   // defaults to showing only starred plays when the tab is first opened
   const [onlyStarred, setOnlyStarred] = useState(true);
 
@@ -5068,6 +5068,12 @@ function TagsView({ tags, setResult, setStarred, onReady }) {
       from = iso(new Date(today.getFullYear(), today.getMonth()-1, 1));
       to   = iso(new Date(today.getFullYear(), today.getMonth(), 0));
       label = "Last month";
+    } else if (range === "yesterday") {
+      // exact single day, so it has to be the local date — the `iso` helper
+      // above runs through UTC and would land on the wrong day either side of
+      // midnight for anyone west of Greenwich
+      from = to = addDays(todayISO(), -1);
+      label = "Yesterday";
     } else if (range === "7d") {
       const d=new Date(today); d.setDate(d.getDate()-6); from=iso(d); label="Last 7 days";
     } else if (range === "30d") {
@@ -5213,8 +5219,8 @@ function TagsView({ tags, setResult, setStarred, onReady }) {
     );
   };
 
-  const FILTERS = [["all","All"],["month","This month"],["lastmonth","Last month"],
-    ["7d","7 days"],["30d","30 days"]];
+  const FILTERS = [["all","All"],["yesterday","Yesterday"],["month","This month"],
+    ["lastmonth","Last month"],["7d","7 days"],["30d","30 days"]];
 
   if (!allRows.length) {
     return (
