@@ -29,8 +29,8 @@ const C = {
   darkSoftEven:"rgba(96,165,250,0.4)",
   /* indicator colors — a neon graffiti set, ordered so each swatch sits
      next to its nearest hue on the color wheel */
-  boom:"#FF073A",          /* neon red: hot bats, 10+ hits last game */
-  slump:"#0FF0FC",         /* neon cyan: cold bats, 6 or fewer hits last game */
+  boom:"#00FF9C",          /* neon green: last game's batting score was 7.0+ */
+  slump:"#FF1E56",         /* neon crimson: last game's batting score was 3.0 or under */
   rematch:"#16A2DF",       /* neon blue: chess-move pitcher */
   rematchLight:"#A9E1F7",  /* light neon blue: faced but short outing */
   travel:"#FF073A",        /* neon red: jet-lagged west→east */
@@ -1332,6 +1332,84 @@ function SeqBlock({ arr, label, onPick }) {
 }
 
 /* ════════════════════ MY TRENDS (yesterday → +5 days) ════════════════════ */
+/* Quality-adjusted batting scores for a set of teams, as { tid: { time: score } }.
+
+   Two callers share this so they can never disagree about a given game: the
+   calendar's eager pass, which needs the hot/cold-bats box on every card, and
+   the game modal's lazy one, which only wants the two teams in front of it.
+
+   Games are picked off `hitsByDate` because that's what the modal's last-5 row
+   renders from; selecting from the schedule instead let the two drift apart.
+   `incomplete` names teams whose window had a gap — usually a box score that
+   hasn't landed yet — so the caller can arrange a retry rather than treating
+   a partial answer as final. */
+async function computeBattingScores(teamIds, beforeTime, scheduleByTeam, hitsByDate, limit=5) {
+  const perTeam = {};
+  const gamePkSet = new Set();
+  const settled = {};      // gamePk -> safe to cache (game is over)
+  let sawLive = false;
+  teamIds.forEach(tid => {
+    const byTime = new Map((scheduleByTeam[tid]||[]).map(s => [s.time, s]));
+    perTeam[tid] = Object.keys(hitsByDate[tid] || {})
+      .filter(t => !beforeTime || t < beforeTime)
+      .sort().reverse().slice(0, limit)
+      .map(time => {
+        const s = byTime.get(time);
+        return s && s.side ? { gamePk:s.gamePk, time, side:s.side, isFinal:!!s.isFinal } : null;
+      })
+      .filter(Boolean);
+    perTeam[tid].forEach(s => {
+      gamePkSet.add(s.gamePk);
+      if (!s.isFinal) { settled[s.gamePk] = false; sawLive = true; }   // sticks
+      else if (settled[s.gamePk] === undefined) settled[s.gamePk] = true;
+    });
+  });
+  if (!gamePkSet.size) return { scores:{}, incomplete:new Set(), sawLive, empty:true };
+
+  const boxCache = {};
+  await mapPool([...gamePkSet], 4, async (gamePk) => {
+    // a game still in progress must not be cached — its box score is still
+    // moving, and the score should follow it on the next refresh
+    const bx = await loadBoxscorePitchers(gamePk, !!settled[gamePk]);
+    if (bx) boxCache[gamePk] = bx;
+  });
+  const pids = new Set();
+  Object.values(boxCache).forEach(bx => {
+    (bx.away||[]).forEach(p=>pids.add(p.pid));
+    (bx.home||[]).forEach(p=>pids.add(p.pid));
+  });
+  // loadPitcherSeasonRates caches per pitcher at module scope, so the eager
+  // pass and every later modal share one fetch per arm for the whole session
+  const rates = {};
+  await mapPool([...pids], 4, async (pid) => { rates[pid] = await loadPitcherSeasonRates(pid); });
+
+  const scores = {}, incomplete = new Set();
+  Object.entries(perTeam).forEach(([tid, games]) => {
+    games.forEach(({ gamePk, time, side }) => {
+      const pitchers = boxCache[gamePk]?.[side==="home"?"away":"home"];
+      if (!pitchers || !pitchers.length) { incomplete.add(Number(tid)); return; }
+      let actual = 0, expected = 0;
+      pitchers.forEach(p => {
+        const trueIP = ipToOuts(p.stat?.inningsPitched)/3;
+        if (!trueIP) return;
+        actual += combinedProduction(p.stat);
+        expected += combinedProduction9(rates[p.pid] || LEAGUE_AVG_RATES)/9*trueIP;
+      });
+      const score = qualityScore(actual, expected);
+      if (score!=null) (scores[tid] = scores[tid]||{})[time] = score;
+      else incomplete.add(Number(tid));
+    });
+  });
+  return { scores, incomplete, sawLive, empty:false };
+}
+
+// hot/cold thresholds for the first trend box, matching the batting-score
+// cell's own soft green/red fills
+const BATS_HOT = 7.0, BATS_COLD = 3.0;
+// how far back the eager pass reads, and therefore the longest run the box
+// can report
+const BATS_WINDOW = 6;
+
 function TravelTrends({ tags, setTag, onReady }) {
   // anchor: today by default, adjustable — see the CALENDAR tab button,
   // which doubles as a date picker once it's already the active tab
@@ -1635,6 +1713,29 @@ function TravelTrends({ tags, setTag, onReady }) {
       setRunsMap(runsByDate);
       setHitsMap(hitsByDate);
       setOppMap(oppByDate);
+
+      /* ── hot/cold bats ────────────────────────────────────────────────
+         The first trend box needs a batting score for every team on the
+         board, which the modal's lazy per-game pass can't supply. Kicked
+         off here without being awaited: it's the most expensive phase on
+         the page — a box score per game plus a season line per pitcher in
+         it — so every other indicator publishes first and this box fills
+         in last rather than holding them up. */
+      const slateTeams = [...new Set(Object.values(dayGames).flat()
+        .flatMap(g => [g.awayId, g.homeId]).filter(id => id!=null))];
+      computeBattingScores(slateTeams, null, scheduleByTeam, hitsByDate, BATS_WINDOW)
+        .then(({ scores, incomplete, sawLive }) => {
+          setBattingScoreMap(prev => {
+            const next = { ...prev };
+            Object.entries(scores).forEach(([tid, byTime]) => { next[tid] = { ...next[tid], ...byTime }; });
+            return next;
+          });
+          // the modal reads the same map, so a team fully covered here never
+          // needs its own fetch. A live game or a gap leaves it open.
+          if (!sawLive) slateTeams.filter(tid => !incomplete.has(tid))
+            .forEach(tid => battingLineFetchedRef.current.add(tid));
+        })
+        .catch(() => { /* the box just stays dark */ });
       const echoList = [];
       Object.entries(byTeamRes).forEach(([tid, res])=>{
         const sig = detectStreakBreak(res, Number(minStreak)||10);
@@ -1796,96 +1897,14 @@ function TravelTrends({ tags, setTag, onReady }) {
     // the rest of the session
     const release = (tids) => tids.forEach(tid => battingLineFetchedRef.current.delete(tid));
     try {
-      const perTeamGames = {};   // tid -> the same 5 prior games hitsLine shows
-      const gamePkSet = new Set();
-      let sawLive = false;
-      need.forEach(tid => {
-        // Pick the games off hitsMap, not off the schedule, because hitsMap is
-        // exactly what hitsLine renders from. Selecting from a different list
-        // let the two drift apart — a game the schedule had but hitsMap didn't
-        // pushed the scored set one game deeper than the displayed set, and
-        // the oldest cell came up empty even though nothing had failed.
-        const byTime = new Map((scheduleMap[tid]||[]).map(s => [s.time, s]));
-        perTeamGames[tid] = Object.keys(hitsMap[tid] || {})
-          .filter(t => t < beforeTime)
-          .sort().reverse().slice(0, 5)
-          .map(time => {
-            const s = byTime.get(time);
-            return s && s.side ? { gamePk:s.gamePk, time, side:s.side, isFinal:!!s.isFinal } : null;
-          })
-          .filter(Boolean);
-        perTeamGames[tid].forEach(s => {
-          gamePkSet.add(s.gamePk);
-          if (!s.isFinal) sawLive = true;
-        });
-      });
+      const { scores, incomplete, sawLive, empty } =
+        await computeBattingScores(need, beforeTime, scheduleMap, hitsMap);
       // nothing to work with yet — the schedule or hits map hasn't landed.
       // Release, so the retry that follows those arriving actually runs.
-      if (!gamePkSet.size) { release(need); return; }
-      const settled = {};    // gamePk -> safe to cache (game is over)
-      Object.values(perTeamGames).flat().forEach(s => {
-        if (!s.isFinal) settled[s.gamePk] = false;                    // sticks
-        else if (settled[s.gamePk] === undefined) settled[s.gamePk] = true;
-      });
-      const boxCache = {};   // gamePk -> { away:[{pid,name,stat}], home:[...] }
-      await mapPool([...gamePkSet], 4, async (gamePk) => {
-        // a game still in progress must not be cached — its box score is still
-        // moving, and the score should follow it on the next refresh
-        const bx = await loadBoxscorePitchers(gamePk, !!settled[gamePk]);
-        if (bx) boxCache[gamePk] = bx;
-      });
-      const pitcherSeasonCache = {};   // pid -> { h9, bb9, hr9, doubles9, triples9 }
-      const boxPids = new Set();
-      Object.values(boxCache).forEach(bx => {
-        (bx.away||[]).forEach(p=>boxPids.add(p.pid));
-        (bx.home||[]).forEach(p=>boxPids.add(p.pid));
-      });
-      await mapPool([...boxPids], 4, async (pid) => {
-        try {
-          const r = await fetch(`${API}/people/${pid}/stats?stats=season&group=pitching&season=${SEASON}`);
-          if (!r.ok) return;
-          const j = await r.json();
-          const stat = j.stats?.[0]?.splits?.[0]?.stat;
-          const outs = ipToOuts(stat?.inningsPitched);
-          if (!stat || !outs) return;   // e.g. a rookie with no innings logged yet
-          pitcherSeasonCache[pid] = {
-            h9: Number(stat.hits||0)*27/outs,
-            bb9: Number(stat.baseOnBalls||0)*27/outs,
-            k9: Number(stat.strikeOuts||0)*27/outs,
-            hr9: Number(stat.homeRuns||0)*27/outs,
-            doubles9: Number(stat.doubles||0)*27/outs,
-            triples9: Number(stat.triples||0)*27/outs,
-          };
-        } catch { /* fall back to league-average below */ }
-      });
-      const newScores = {};   // tid -> { time -> score }
-      // a team whose box score wasn't ready yet for one of its last 5 games
-      // (the box score for a game that *just* went final can lag behind the
-      // linescore hit count — which is why that game's HITS number already
-      // shows while its SCORE doesn't) — tracked so that one gap doesn't
-      // permanently blacklist the whole team's batting line for the rest of
-      // the session; see battingLineFetchedRef handling below.
-      const incomplete = new Set();
-      need.forEach(tid => {
-        perTeamGames[tid].forEach(({ gamePk, time, side }) => {
-          const bx = boxCache[gamePk];
-          const pitchers = bx?.[side==="home"?"away":"home"];
-          if (!pitchers || !pitchers.length) { incomplete.add(tid); return; }
-          let actual = 0, expected = 0;
-          pitchers.forEach(p=>{
-            const trueIP = ipToOuts(p.stat?.inningsPitched)/3;
-            if (!trueIP) return;
-            actual += combinedProduction(p.stat);
-            expected += combinedProduction9(pitcherSeasonCache[p.pid] || LEAGUE_AVG_RATES) / 9 * trueIP;
-          });
-          const score = qualityScore(actual, expected);
-          if (score!=null) (newScores[tid] = newScores[tid]||{})[time] = score;
-          else incomplete.add(tid);
-        });
-      });
+      if (empty) { release(need); return; }
       setBattingScoreMap(prev => {
         const next = { ...prev };
-        Object.entries(newScores).forEach(([tid, byTime]) => { next[tid] = { ...next[tid], ...byTime }; });
+        Object.entries(scores).forEach(([tid, byTime]) => { next[tid] = { ...next[tid], ...byTime }; });
         return next;
       });
       // let a still-incomplete team retry the next time its modal opens,
@@ -2244,6 +2263,24 @@ function TravelTrends({ tags, setTag, onReady }) {
     const playedYesterday = (tid) => (scheduleMap[tid]||[]).some(s=>s.date===yesterday && s.isFinal);
     const travelersY = (g.travelers||[]).filter(x=>playedYesterday(x.teamId));
     const echoY = echo.filter(e=>playedYesterday(e.teamId));
+
+    /* the team's most recent batting score before this game, and how many
+       games back that same verdict runs unbroken. Deliberately NOT gated on
+       having played yesterday: this is a claim about their last game
+       whenever that was, not about last night specifically. */
+    const batRunFor = (tid) => {
+      const scores = battingScoreMap[tid];
+      if (!scores) return null;
+      const times = Object.keys(scores).filter(t => t < g.time).sort().reverse();
+      const verdict = (t) => scores[t] >= BATS_HOT ? "hot"
+        : scores[t] <= BATS_COLD ? "cold" : null;
+      const dir = times.length ? verdict(times[0]) : null;
+      if (!dir) return null;
+      let n = 1;
+      while (n < times.length && verdict(times[n]) === dir) n++;
+      return { dir, n };
+    };
+    const batRuns = { [g.awayId]: batRunFor(g.awayId), [g.homeId]: batRunFor(g.homeId) };
     const cbY = cb.filter(c=>playedYesterday(c.teamId));
     const bigdayY = bigday.filter(b=>playedYesterday(b.teamId));
     const shutoutY = shutout.filter(s=>playedYesterday(s.teamId));
@@ -2252,6 +2289,7 @@ function TravelTrends({ tags, setTag, onReady }) {
     const sideKeys = { [g.awayId]:new Set(), [g.homeId]:new Set() };
     const add = (tid, key) => { if (sideKeys[tid]) sideKeys[tid].add(key); };
     travelersY.forEach(x=>add(x.teamId, "travel"));
+    Object.entries(batRuns).forEach(([tid, r]) => { if (r) add(Number(tid), "bat"); });
     echoY.forEach(e=>add(e.teamId, "echo"));
     cbY.forEach(c=>add(c.teamId, "late"));
     bigdayY.forEach(b=>add(b.teamId, "bigday"));
@@ -2260,10 +2298,12 @@ function TravelTrends({ tags, setTag, onReady }) {
     reality.forEach(x=>add(x.teamId, "gauntlet"));   // opposite extreme, same box
     formerTeam.forEach(x=>add(x.teamId, "formerTeam"));
 
-    const any = travelersY.length>0 || echoY.length>0 || cbY.length>0 || rematch.length>0 || bigdayY.length>0 || shutoutY.length>0 || gauntlet.length>0 || reality.length>0 || formerTeam.length>0;
+    const any = travelersY.length>0 || echoY.length>0 || cbY.length>0 || rematch.length>0 || bigdayY.length>0 || shutoutY.length>0 || gauntlet.length>0 || reality.length>0 || formerTeam.length>0 || !!batRuns[g.awayId] || !!batRuns[g.homeId];
     return { travel:travelersY.length>0, travelers:travelersY, echo:echoY, cb:cbY, rematch, bigday:bigdayY, shutout:shutoutY, gauntlet, reality, formerTeam, any,
       keysFor:(tid)=>sideKeys[tid] || new Set(),
       gauntletKind,
+      batKind:(tid)=>batRuns[tid]?.dir || null,
+      batStreak:(tid)=>batRuns[tid]?.n || 0,
       bigDayKind,
       rematchTier:(tid)=>rematchTier[tid] || null,
       rematchVerdict:(tid)=>rematchVerdict[tid] || null,
@@ -2426,6 +2466,17 @@ function LegendRow({ s }) {
 function Legend() {
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:6, marginBottom:10 }}>
+      {/* the bats box, first on every card, carries its own pair */}
+      <div style={{ display:"flex", gap:7 }}>
+        <span style={{ width:2, borderRadius:1, background:C.ruleDark, flexShrink:0 }} />
+        <div style={{ display:"flex", flexDirection:"column", gap:6, minWidth:0 }}>
+          {SHARED_BOX_ROWS_3.map(s => <LegendRow key={s.key+s.label} s={s} />)}
+          <span style={{ fontFamily:MONO, fontSize:9, letterSpacing:"0.08em",
+            textTransform:"uppercase", color:C.ruleDark }}>
+            ↑ one box, two colors — 2x, 3x … marks a run of the same verdict
+          </span>
+        </div>
+      </div>
       {/* Big Day and Shutout are the same box lighting up a different color,
           so they're bracketed together — two loose rows read as two slots. */}
       <div style={{ display:"flex", gap:7 }}>
@@ -2438,7 +2489,7 @@ function Legend() {
           </span>
         </div>
       </div>
-      {TREND_SLOTS.slice(1).filter(s=>s.key!=="gauntlet")
+      {TREND_SLOTS.filter(s=>!["bat","bigday","gauntlet"].includes(s.key))
         .map(s => <LegendRow key={s.key} s={s} />)}
       {/* the Gauntlet's box carries its mirror the same way */}
       <div style={{ display:"flex", gap:7 }}>
@@ -2489,6 +2540,8 @@ const CARD_H = CARD_HEAD_H + CARD_ROW_GAP + MAIN_H*2 + CARD_PAD*2 + 2;   // +2 =
 // yesterday (see the "*" footnote the Legend renders below the list) —
 // Gauntlet and Homecoming Jinx are the only two exempt from that gate.
 const TREND_SLOTS = [
+  { key:"bat", color:C.boom, label:"Hot bats", shortLabel:"Hot bats",
+    desc:"Their last game's batting score was 7.0 or better. A number in the box is how many games that run reaches back" },
   { key:"bigday", color:C.bigday, label:"Big Day", shortLabel:"Big Day",
     desc:"Scored 10+ runs in their last game", yesterday:true },
   { key:"late",   color:C.late,   label:"Late go-ahead", shortLabel:"Late GA",
@@ -2535,8 +2588,16 @@ const REALITY_LEGEND_ENTRY = gauntletSlotFor("easy");
 // Big Day and its opposite-extreme twin Shutout are one box, so the legend
 // renders them as a bracketed pair (see Legend) rather than as two rows that
 // look like two separate slots; the Gauntlet and Reality Check pair the same way.
-const SHARED_BOX_ROWS = [TREND_SLOTS[0], SHUTOUT_LEGEND_ENTRY];
+const SHARED_BOX_ROWS = [TREND_SLOTS.find(s=>s.key==="bigday"), SHUTOUT_LEGEND_ENTRY];
 const SHARED_BOX_ROWS_2 = [TREND_SLOTS.find(s=>s.key==="gauntlet"), REALITY_LEGEND_ENTRY];
+// the bats box is a third two-color slot: hot last game vs cold last game,
+// which no team can be at once
+const batSlotFor = (kind) => kind==="cold"
+  ? { key:"bat", color:C.slump, label:"Cold bats", shortLabel:"Cold bats",
+      desc:"Their last game's batting score was 3.0 or under. A number in the box is how many games that run reaches back" }
+  : TREND_SLOTS.find(s=>s.key==="bat");
+const COLD_BATS_LEGEND_ENTRY = batSlotFor("cold");
+const SHARED_BOX_ROWS_3 = [TREND_SLOTS.find(s=>s.key==="bat"), COLD_BATS_LEGEND_ENTRY];
 // legend-only, and not a trend box at all: the neon-yellow outline drawn
 // around BOTH ERA numbers when each starter has already faced the lineup
 // across from him 2+ times this season. `outline` renders the swatch as a
@@ -2677,8 +2738,11 @@ function TrendBox({ present, color, title, inner, dark }) {
       opacity: present ? 1 : 0.45,
       transition:"background 0.4s ease, box-shadow 0.4s ease, opacity 0.4s ease",
       display:"flex", alignItems:"center", justifyContent:"center" }}>
-      {present && inner && <span style={{ fontFamily:MONO, fontSize:9, fontWeight:800,
-        color:"#fff", lineHeight:1 }}>{inner}</span>}
+      {/* a two-character run count ("3x") has to drop a size to clear the
+          box; a single "!" keeps the larger one */}
+      {present && inner && <span style={{ fontFamily:MONO,
+        fontSize: String(inner).length > 1 ? 7.5 : 9, fontWeight:800,
+        color:"#fff", lineHeight:1, letterSpacing:"-0.03em" }}>{inner}</span>}
     </span>
   );
 }
@@ -2705,19 +2769,25 @@ function TrendChip({ slot, present }) {
   );
 }
 
-/* full-width row of this game's situational-trend indicators, split into
-   the away team's 6 slots (left half) and the home team's 6 slots (right
-   half) — together spanning the whole modal width, one continuous strip of
-   12 chips lined up with the away/home columns below. */
+/* full-width row of this game's situational-trend indicators, split into the
+   away team's slots (left half) and the home team's (right half) — together
+   spanning the whole modal width, one continuous strip lined up with the
+   away/home columns below. */
 function TrendIndicatorRow({ t, awayId, homeId }) {
   const half = (tid) => {
     const keys = t.keysFor(tid);
-    const kind = t.bigDayKind(tid);
     return (
       <div style={{ display:"flex", gap:3, flex:1, minWidth:0 }}>
         {TREND_SLOTS.map(slot => {
-          const s = slot.key==="bigday" ? bigDaySlotFor(kind) : slot;
-          return <TrendChip key={slot.key} slot={s} present={keys.has(slot.key)} />;
+          // each two-color box picks the variant that actually fired, so the
+          // chip spells out Shutout / Reality Check / Cold bats rather than
+          // its slot-mate's name
+          const s = slot.key==="bigday" ? bigDaySlotFor(t.bigDayKind(tid))
+            : slot.key==="gauntlet" ? gauntletSlotFor(t.gauntletKind?.(tid))
+            : slot.key==="bat" ? batSlotFor(t.batKind?.(tid)) : slot;
+          const run = slot.key==="bat" ? (t.batStreak?.(tid) || 0) : 0;
+          const chip = run>=2 ? { ...s, shortLabel:`${s.shortLabel} ${run}x` } : s;
+          return <TrendChip key={slot.key} slot={chip} present={keys.has(slot.key)} />;
         })}
       </div>
     );
@@ -2899,14 +2969,20 @@ function StatsRow({ tid, t, dark }) {
       <div style={{ display:"flex", alignItems:"center", gap:BOX_GAP }}>
         {TREND_SLOTS.map(slot=>{
           const kind = slot.key==="bigday" ? t.bigDayKind(tid)
-            : slot.key==="gauntlet" ? t.gauntletKind?.(tid) : null;
+            : slot.key==="gauntlet" ? t.gauntletKind?.(tid)
+            : slot.key==="bat" ? t.batKind?.(tid) : null;
           const s = slot.key==="bigday" ? bigDaySlotFor(kind)
-            : slot.key==="gauntlet" ? gauntletSlotFor(kind) : slot;
+            : slot.key==="gauntlet" ? gauntletSlotFor(kind)
+            : slot.key==="bat" ? batSlotFor(kind) : slot;
           const present = t.keysFor(tid).has(slot.key);
+          // The bats box counts its run inside itself ("3x" = three straight
+          // games at that verdict); a single game shows the color alone.
           // Shutout only earns "!" on a real 2+ game shutout streak, same as
           // Big Day earning it on a 2+ game 10-run streak — a single shutout
           // against a good pitcher today just lights the box plainly.
-          const inner = slot.key!=="bigday" ? null
+          const batRun = slot.key==="bat" ? (t.batStreak?.(tid) || 0) : 0;
+          const inner = slot.key==="bat" ? (batRun>=2 ? `${batRun}x` : null)
+            : slot.key!=="bigday" ? null
             : kind==="zero" ? (t.shutoutStreak(tid) ? "!" : null)
             : t.bigDayStreak(tid) ? "!" : null;
           return <TrendBox key={slot.key} present={present} color={s.color} inner={inner}
